@@ -1,0 +1,16 @@
+# Local editor state and generated search/diagnostic caches
+.vs/
+.cache/
+__pycache__/
+*.py[cod]
+*.log
+
+# Local Python environments and configuration secrets
+.venv/
+venv/
+.env
+.env.*
+
+# Generated excerpts and temporary work; keep assets/source_documents tracked
+/outputs/
+/work/

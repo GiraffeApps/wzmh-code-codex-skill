@@ -1,0 +1,4 @@
+interface:
+  display_name: "WZMH_Code_Skill"
+  short_description: "OBC 2024 Vols 1/2 and NBC 2020 PDF references"
+  default_prompt: "Use $wzmh-code-skill to answer my OBC or NBC question from the bundled code PDFs and automatically open the supporting reference page in the side view with the sentence highlighted in yellow."
