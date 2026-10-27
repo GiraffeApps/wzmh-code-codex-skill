@@ -14,3 +14,6 @@ venv/
 # Generated excerpts and temporary work; keep assets/source_documents tracked
 /outputs/
 /work/
+
+/docs
+/tests
