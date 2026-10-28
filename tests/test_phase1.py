@@ -187,6 +187,15 @@ class Regression(unittest.TestCase):
                         '--excerpt-output', self.directory / 'text-file.pdf')
         self.assertTrue(result['verified'])
 
+    def test_default_retention_is_200_for_new_and_reused_excerpts(self):
+        first = self.excerpt('first.pdf')
+        self.assertEqual(first['retention']['limit'], 200)
+        self.assertEqual(first['retention']['removed'], [])
+        reused = self.excerpt('reused.pdf')
+        self.assertTrue(reused['reused'])
+        self.assertEqual(reused['retention']['limit'], 200)
+        self.assertEqual(reused['retention']['removed'], [])
+
     def test_retention_preserves_pins_and_unrelated_files(self):
         first = self.excerpt('first.pdf')
         pinned = Path(first['preview'])

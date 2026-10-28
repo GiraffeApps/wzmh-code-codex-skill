@@ -152,8 +152,8 @@ def main(diagnostic=None):
     parser.add_argument("--context-page", type=int,
                         help="Optional adjacent one-based page to include in the excerpt (maximum two pages)")
     parser.add_argument("--context-text", help="Optional exact continuation to highlight on --context-page")
-    parser.add_argument("--max-pdfs", type=int, default=50,
-                        help="Keep this many unpinned generated excerpts in the same folder (default: 50)")
+    parser.add_argument("--max-pdfs", type=int, default=200,
+                        help="Keep this many unpinned generated excerpts in the same folder (default: 200)")
     args = parser.parse_args()
     if args.max_pdfs < 1:
         parser.error("--max-pdfs must be positive.")
