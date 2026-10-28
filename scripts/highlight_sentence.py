@@ -145,6 +145,8 @@ def main(diagnostic=None):
     text_source = parser.add_mutually_exclusive_group(required=True)
     text_source.add_argument("--text", help="Exact sentence to highlight")
     text_source.add_argument("--text-file", type=Path, help="UTF-8 file containing the exact sentence")
+    text_source.add_argument("--table-text", action="append",
+                             help="Exact table heading, cell, row text or footnote; repeat for separate regions")
     parser.add_argument("--output", type=Path, help="Optional full highlighted PDF copy")
     parser.add_argument("--preview-output", type=Path, help="Single-page excerpt made from --output")
     parser.add_argument("--excerpt-output", type=Path,
@@ -152,6 +154,8 @@ def main(diagnostic=None):
     parser.add_argument("--context-page", type=int,
                         help="Optional adjacent one-based page to include in the excerpt (maximum two pages)")
     parser.add_argument("--context-text", help="Optional exact continuation to highlight on --context-page")
+    parser.add_argument("--context-table-text", action="append",
+                        help="Exact table region on --context-page; repeat for separate regions")
     parser.add_argument("--max-pdfs", type=int, default=200,
                         help="Keep this many unpinned generated excerpts in the same folder (default: 200)")
     args = parser.parse_args()
@@ -164,8 +168,13 @@ def main(diagnostic=None):
         parser.error("Specify --output or --excerpt-output.")
     if args.preview_output and not args.output:
         parser.error("--preview-output requires --output.")
-    if args.context_text and not args.context_page:
-        parser.error("--context-text requires --context-page.")
+    table_mode = args.table_text is not None
+    if (args.context_text or args.context_table_text) and not args.context_page:
+        parser.error("Context text requires --context-page.")
+    if table_mode and args.context_text:
+        parser.error("Use --context-table-text with --table-text.")
+    if not table_mode and args.context_table_text:
+        parser.error("--context-table-text requires --table-text.")
     if args.context_page and not (args.excerpt_output or args.preview_output):
         parser.error("--context-page requires an excerpt output.")
     targets = [target for target in (args.output, args.preview_output, args.excerpt_output) if target]
@@ -173,10 +182,11 @@ def main(diagnostic=None):
         parser.error("Output paths must be distinct.")
     if any(target.resolve() == args.source.resolve() or target.exists() for target in targets):
         parser.error("Outputs must be new files, distinct from the source.")
-    sentence = normalize(args.text if args.text is not None
-                         else args.text_file.read_text(encoding="utf-8-sig"))
-    if not sentence:
-        parser.error("Sentence must not be empty.")
+    passages = (args.table_text if table_mode else [args.text if args.text is not None
+                else args.text_file.read_text(encoding="utf-8-sig")])
+    passages = [normalize(passage) for passage in passages]
+    if any(not passage for passage in passages):
+        parser.error("Highlighted text must not be empty.")
     with pymupdf.open(args.source) as document:
         if not 1 <= args.page <= len(document):
             parser.error("Page is outside the PDF.")
@@ -186,19 +196,30 @@ def main(diagnostic=None):
         excerpt_pages = sorted({args.page, args.context_page} - {None})
         expected_highlights = {}
         resolved_passages = {}
-        for number, passage in [(args.page, sentence)] + ([(args.context_page, normalize(args.context_text))] if args.context_text else []):
-            current = document[number - 1]
-            try:
-                resolved_passages[number],expected_highlights[number]=exact_passage(current,passage)
-            except ValueError as error:
-                parser.error(str(error))
-        sentence=resolved_passages[args.page]
-        continuation=resolved_passages.get(args.context_page,'')
+        resolved_quads = {}
+        requested = {args.page: passages}
+        context_passages = args.context_table_text if table_mode else ([args.context_text] if args.context_text else [])
+        if context_passages:
+            requested[args.context_page] = [normalize(passage) for passage in context_passages]
+            if any(not passage for passage in requested[args.context_page]):
+                parser.error("Highlighted text must not be empty.")
+        for number, page_passages in requested.items():
+            resolved_passages[number] = []
+            resolved_quads[number] = []
+            expected_highlights[number] = []
+            for passage in page_passages:
+                try:
+                    actual, quads = exact_passage(document[number - 1], passage)
+                except ValueError as error:
+                    parser.error(str(error))
+                resolved_passages[number].append(actual)
+                resolved_quads[number].append(quads)
+                expected_highlights[number].extend(quads)
         source_stat = args.source.stat()
         reference_key = hashlib.sha256(json.dumps([
-            "baked-fit-v2", str(args.source.resolve()), source_stat.st_size,
-            source_stat.st_mtime_ns, args.page, sentence, args.context_page,
-            continuation, reference_cache.digest(args.source)
+            "baked-fit-v3", str(args.source.resolve()), source_stat.st_size,
+            source_stat.st_mtime_ns, args.page, table_mode, resolved_passages,
+            args.context_page, reference_cache.digest(args.source)
         ], ensure_ascii=False).encode("utf-8")).hexdigest()
         if args.excerpt_output and not args.output:
             cached = reusable_excerpt(args.excerpt_output.parent, reference_key, document,
@@ -217,19 +238,14 @@ def main(diagnostic=None):
                 return
         page = document[args.page - 1]
         quads = expected_highlights[args.page]
-        annotation = page.add_highlight_annot(quads)
-        annotation.set_colors(stroke=(1, 1, 0))
-        annotation.set_opacity(0.35)
-        annotation.set_info(title="OBC Reference", content=sentence)
-        annotation.update()
-        if args.context_text:
-            context_page = document[args.context_page - 1]
-            continuation_quads = expected_highlights[args.context_page]
-            extra = context_page.add_highlight_annot(continuation_quads)
-            extra.set_colors(stroke=(1, 1, 0))
-            extra.set_opacity(0.35)
-            extra.set_info(title="OBC Reference", content=continuation)
-            extra.update()
+        for number, page_passages in resolved_passages.items():
+            current = document[number - 1]
+            for passage, selection_quads in zip(page_passages, resolved_quads[number]):
+                annotation = current.add_highlight_annot(selection_quads)
+                annotation.set_colors(stroke=(1, 1, 0))
+                annotation.set_opacity(0.35)
+                annotation.set_info(title="Code Reference", content=passage)
+                annotation.update()
         excerpt_pages = sorted({args.page, args.context_page} - {None})
         excerpt_originals = [
             (document[n - 1].get_text(), document[n - 1].read_contents(),
@@ -275,8 +291,8 @@ def main(diagnostic=None):
             assert marked_page.rotation == original_rotation, "Page rotation changed"
             kind, destination = result.xref_get_key(result.pdf_catalog(), "OpenAction")
             assert kind == "array" and destination.startswith(f"[{marked_page.xref} 0 R"), "Opening page incorrect"
-            assert any(a.info.get("content") == sentence and a.type[0] == 8
-                       for a in marked_page.annots()), "Highlight missing"
+            assert all(any(a.info.get("content") == passage and a.type[0] == 8
+                           for a in marked_page.annots()) for passage in resolved_passages[args.page]), "Highlight missing"
             if args.preview_output:
                 args.preview_output.parent.mkdir(parents=True, exist_ok=True)
                 with pymupdf.open() as preview:
@@ -306,11 +322,12 @@ def main(diagnostic=None):
                 for number, expected in expected_highlights.items():
                     assert covers_highlights(preview[excerpt_pages.index(number)], expected), "Complete highlight coverage missing"
             else:
-                assert any(a.type[0] == 8 and a.info.get("content") == sentence
-                           for a in preview_page.annots()), "Preview highlight missing"
-            if args.context_text and not args.excerpt_output:
-                assert any(a.type[0] == 8 and a.info.get("content") == continuation
-                           for a in preview[excerpt_pages.index(args.context_page)].annots()), "Continuation highlight missing"
+                assert all(any(a.type[0] == 8 and a.info.get("content") == passage
+                               for a in preview_page.annots()) for passage in resolved_passages[args.page]), "Preview highlight missing"
+            if context_passages and not args.excerpt_output:
+                context_page = preview[excerpt_pages.index(args.context_page)]
+                assert all(any(a.type[0] == 8 and a.info.get("content") == passage
+                               for a in context_page.annots()) for passage in resolved_passages[args.context_page]), "Continuation highlight missing"
     display_path = preview_path or args.output
     display_page = excerpt_pages.index(args.page) + 1 if preview_path else args.page
     cache_warning = None

@@ -118,6 +118,63 @@ class Regression(unittest.TestCase):
         self.assertFalse(self.search('--keyword', 'public corridor')['results'])
         self.assertIn('completely revised', self.search('--pages', 1)['results'][0]['text'])
 
+    def test_chat_local_index_does_not_write_skill_wide_cache(self):
+        chat_cache = self.directory / 'references' / 'pdf-text-index.sqlite3'
+        first = self.search('--cache-path', chat_cache, '--keyword', 'public corridor')
+        self.assertEqual(first['results'][0]['pdf_page'], 1)
+        self.assertTrue(chat_cache.is_file())
+        self.assertFalse(search.CACHE_PATH.exists())
+        warm = self.search('--cache-path', chat_cache, '--keyword', 'public corridor')
+        self.assertFalse(warm['indexed_pages'])
+        self.assertEqual(first['results'], warm['results'])
+
+    def test_same_stat_source_change_invalidates_search_index(self):
+        self.search('--index-only')
+        self.assertFalse(self.search('--index-only')['indexed_pages'])
+        stat = self.source.stat()
+        raw = self.source.read_bytes()
+        self.assertIn(b'Owner-A', raw)
+        self.source.write_bytes(raw.replace(b'Owner-A', b'Owner-B'))
+        os.utime(self.source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(self.source.stat().st_size, stat.st_size)
+        self.assertTrue(self.search('--index-only')['indexed_pages'])
+
+    def test_table_regions_on_two_pages_are_verified_and_reused(self):
+        before = reference_cache.digest(self.source)
+        passages = {1: ['3.3.1.9. Corridors', SENTENCE, 'Exceptions require separate review.'],
+                    2: ['3.3.1.10. Doors', 'A garage door shall be self-closing.']}
+        selections = []
+        for text in passages[1]:
+            selections.extend(['--table-text', text])
+        selections.extend(['--context-page', 2])
+        for text in passages[2]:
+            selections.extend(['--context-table-text', text])
+        first = invoke(highlight, self.source, '--page', 1, *selections,
+                       '--excerpt-output', self.directory / 'references' / 'table.pdf')
+        self.assertTrue(first['verified'])
+        self.assertEqual(first['retention']['limit'], 200)
+        with pymupdf.open(first['preview']) as saved, pymupdf.open(self.source) as original:
+            self.assertEqual(len(saved), 2)
+            for number, texts in passages.items():
+                source_page, excerpt_page = original[number - 1], saved[number - 1]
+                self.assertEqual(source_page.get_text(), excerpt_page.get_text())
+                self.assertEqual(source_page.mediabox, excerpt_page.mediabox)
+                for text in texts:
+                    self.assertTrue(highlight.covers_highlights(
+                        excerpt_page, source_page.search_for(text, quads=True)))
+        second = invoke(highlight, self.source, '--page', 1, *selections,
+                        '--excerpt-output', self.directory / 'references' / 'table-reused.pdf')
+        self.assertTrue(second['reused'])
+        self.assertEqual(first['preview'], second['preview'])
+        self.assertEqual(before, reference_cache.digest(self.source))
+
+    def test_missing_table_region_rejects_entire_excerpt(self):
+        target = self.directory / 'references' / 'wrong-table.pdf'
+        with self.assertRaises(SystemExit):
+            invoke(highlight, self.source, '--page', 1, '--table-text', SENTENCE,
+                   '--table-text', 'Invented table footnote.', '--excerpt-output', target)
+        self.assertFalse(target.exists())
+
     def test_excerpt_quality_full_sentence_and_source_unchanged(self):
         before = reference_cache.digest(self.source)
         result = self.excerpt()

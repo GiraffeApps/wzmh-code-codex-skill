@@ -12,6 +12,7 @@ import sqlite3
 import sys
 from typing import Iterable
 from diagnostics import diagnostic_run
+from reference_cache import digest
 
 def pdf_engine():
     """Warm-cache retrieval uses only SQLite; import the PDF engine on extraction."""
@@ -27,9 +28,10 @@ LIBRARY_ROOT = SKILL_ROOT / "assets" / "source_documents"
 CACHE_PATH = SKILL_ROOT / ".cache" / "pdf_text_index.sqlite3"
 
 
-def connect() -> sqlite3.Connection:
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(CACHE_PATH)
+def connect(cache_path=None) -> sqlite3.Connection:
+    cache_path = Path(cache_path) if cache_path is not None else CACHE_PATH
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(cache_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(
@@ -48,6 +50,7 @@ def connect() -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE TABLE IF NOT EXISTS search_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS source_digests (path TEXT PRIMARY KEY, sha256 TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS page_lookup (source_path TEXT, pdf_page INTEGER, fts_rowid INTEGER, PRIMARY KEY(source_path,pdf_page))")
     if conn.execute("SELECT value FROM search_meta WHERE key='page_lookup_version'").fetchone() != ('1',):
         conn.execute("INSERT OR REPLACE INTO page_lookup SELECT source_path,CAST(pdf_page AS INTEGER),rowid FROM page_text")
@@ -67,7 +70,10 @@ def needs_index(conn: sqlite3.Connection, source: Path, rebuild: bool) -> bool:
     record = conn.execute(
         "SELECT size, mtime_ns FROM sources WHERE path = ?", (str(source.resolve()),)
     ).fetchone()
-    return record != (stat.st_size, stat.st_mtime_ns)
+    if record != (stat.st_size, stat.st_mtime_ns):
+        return True
+    checksum = conn.execute("SELECT sha256 FROM source_digests WHERE path=?", (str(source.resolve()),)).fetchone()
+    return checksum is None or checksum[0] != digest(source)
 
 
 def index_source(conn: sqlite3.Connection, source: Path) -> int:
@@ -94,6 +100,7 @@ def index_source(conn: sqlite3.Connection, source: Path) -> int:
         """,
         (resolved, stat.st_size, stat.st_mtime_ns, len(rows)),
     )
+    conn.execute("INSERT OR REPLACE INTO source_digests VALUES (?,?)", (resolved, digest(source)))
     return len(rows)
 
 
@@ -354,6 +361,8 @@ def retrieve(conn, sources, *, keywords=None, regex=None, query=None, pages=None
 def main(diagnostic=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", action="append", type=Path, help="PDF path; repeat for multiple volumes.")
+    parser.add_argument("--cache-path", type=Path,
+                        help="SQLite index path for this invocation; use a chat-local path for temporary PDFs.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--keyword", action="append", help="Exact keyword/phrase; repeat for AND (legacy).")
     group.add_argument("--regex", help="Python regex over cached page text.")
@@ -431,7 +440,7 @@ def main(diagnostic=None) -> None:
     except (ValueError, TypeError, re.error, OSError) as error:
         parser.error(str(error))
     indexed, reused = {}, []
-    conn = connect()
+    conn = connect(args.cache_path)
     try:
         all_sources = {str(s.resolve()): s for _, sources, _ in prepared for s in sources}
         for resolved, source in all_sources.items():

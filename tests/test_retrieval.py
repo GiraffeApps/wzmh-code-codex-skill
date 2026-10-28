@@ -36,6 +36,7 @@ class StructuralRetrieval(unittest.TestCase):
         ]
         key=str(self.source.resolve());st=self.source.stat()
         self.conn.execute('INSERT INTO sources VALUES (?,?,?,?)',(key,st.st_size,st.st_mtime_ns,len(self.texts)))
+        self.conn.execute('INSERT INTO source_digests VALUES (?,?)',(key,search.digest(self.source)))
         for page,text in enumerate(self.texts,1):
             cur=self.conn.execute('INSERT INTO page_text VALUES (?,?,?)',(key,page,text))
             self.conn.execute('INSERT INTO page_lookup VALUES (?,?,?)',(key,page,cur.lastrowid))
