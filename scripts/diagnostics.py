@@ -5,10 +5,46 @@ from pathlib import Path
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 import sys
 import time
 
-LOG_PATH = Path(__file__).resolve().parent.parent / ".cache" / "diagnostics.jsonl"
+def user_data_root():
+    """Writable per-user runtime data, independent of skill installation."""
+    local_data = os.environ.get('LOCALAPPDATA')
+    if local_data:
+        root = Path(local_data)
+    elif sys.platform == 'win32':
+        root = Path.home() / 'AppData' / 'Local'
+    else:
+        root = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local' / 'state')
+    return root / 'WZMH' / 'CodeAI'
+
+
+def default_log_path():
+    """Keep logs in the current user's local data, independent of skill installation."""
+    return user_data_root() / 'logs' / 'diagnostics.jsonl'
+
+
+LOG_PATH = default_log_path()
+
+
+@contextmanager
+def stage_timer(fields, name):
+    """Accumulate wall time for a fixed script stage, including failed attempts.
+
+    Callers use constant stage names, never source paths, questions or PDF text.
+    Disabled diagnostics do not read the clock or change helper return values.
+    """
+    if fields is None:
+        yield
+        return
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        stages = fields.setdefault('stages_ms', {})
+        stages[name] = round(stages.get(name, 0) + (time.perf_counter() - started) * 1000, 3)
 
 
 @contextmanager

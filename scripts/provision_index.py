@@ -2,11 +2,27 @@
 from pathlib import Path
 import re
 
-VERSION = '4'  # Bump when structural parsing changes; derived metadata rebuilds once.
+VERSION = '5'  # Bump when structural parsing changes; derived metadata rebuilds once.
 HEADING = re.compile(r'(?m)^[ \t]*((?:[A-Z]-)?\d+(?:\.\d+){3}\.?)'
                      r'(?:[ \t]+|[ \t]*\r?\n[ \t]*)([A-Z][^\n]{1,140})$')
 REFERENCE = re.compile(r'(?<![\w.-])((?:[A-Z]-)?\d+(?:\.\d+){3})(?![\w]|\.\d)(?:\.)?(?:[ \t]*\((\d+)\))?')
 SENTENCE = re.compile(r'(?m)^[ \t]*\(?\d+\)')
+OBJECTIVE_HEADING = re.compile(
+    r'(?im)^[ \t]*(?:Functional\s+Statements\s+and\s+Objectives|'
+    r'Objectives\s+and\s+Functional\s+Statements)[ \t\r]*$')
+
+
+def sa1_mapping_page(text):
+    """Recognize the bundled SA-1 mapping header, not a reference to SA-1 in prose."""
+    return bool(re.search(
+        r'(?im)^[ \t]*MMAH\s+Supplementary\s+Standard\s+SA[-\u2013]\s*1\b', text[:600]))
+
+
+def objective_mapping_page(text):
+    """Mapping tables stay searchable but cannot establish their referenced Articles."""
+    return sa1_mapping_page(text) or bool(
+        OBJECTIVE_HEADING.search(text) and
+        re.search(r'\b(?:Provision|Acceptable\s+Solutions)\b', text, re.I))
 
 
 def schema(conn):
@@ -37,12 +53,18 @@ def ensure(conn, source):
     carried = None
     previous_division = None
     for page, text in conn.execute('SELECT CAST(pdf_page AS INTEGER),text FROM page_text WHERE source_path=? ORDER BY CAST(pdf_page AS INTEGER)', (key,)):
+        if sa1_mapping_page(text):
+            # SA-1 repeats Article titles and Sentence numbers, but its rows are
+            # objective mappings, not the text of the referenced requirement.
+            carried = None
+            previous_division = None
+            continue
         divisions = re.findall(r'Division\s+([ABC])\b', text[:400]+'\n'+text[-250:])
         division = divisions[0] if divisions else previous_division
         part = re.search(r'Division\s+[ABC][^\n]*?Part\s+(\d+)\b', text[:400])
         note_page = bool(re.search(r'(?m)^\s*A-\d+(?:\.\d+){2,}\.?(?:\([^\n)]*\))*\s+[A-Z]', text))
         alternative = 'Compliance Alternative' in text
-        objective_table = 'Functional Statements and Objectives' in text and 'Provision' in text
+        objective_table = objective_mapping_page(text)
         owner = re.search(r'(?m)^\s*Table\s+(\d+(?:\.\d+){3})',text) if objective_table else None
         if division != previous_division or note_page or alternative:
             carried = None

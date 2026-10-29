@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 import hashlib
-from diagnostics import diagnostic_run
+from diagnostics import diagnostic_run, stage_timer
 import reference_cache
 
 MANAGED_TAG = "obc-reference-generated-v1"
@@ -101,12 +101,13 @@ def covers_highlights(page, quads):
                                   for rect in yellow) for quad in quads)
 
 
-def reusable_excerpt(directory, key, document, pages, highlighted_pages, expected_highlights=None):
+def reusable_excerpt(directory, key, document, pages, highlighted_pages, expected_highlights=None, diagnostic=None):
     """Reuse only a matching generated PDF whose text, geometry and marks still verify."""
     if not directory.exists():
         return None
     try:
-        indexed = reference_cache.candidate(directory, key, pymupdf)
+        with stage_timer(diagnostic, 'excerpt_lookup'):
+            indexed = reference_cache.candidate(directory, key, pymupdf)
         candidates = [indexed] if indexed else []
     except Exception:
         candidates = directory.glob('*.pdf')
@@ -114,7 +115,7 @@ def reusable_excerpt(directory, key, document, pages, highlighted_pages, expecte
         if candidate.is_symlink() or candidate.resolve().parent != directory.resolve():
             continue
         try:
-            with pymupdf.open(candidate) as cached:
+            with stage_timer(diagnostic, 'verification'), pymupdf.open(candidate) as cached:
                 if (cached.metadata.get("keywords") != MANAGED_TAG
                         or cached.metadata.get("subject") != "reference-key:" + key
                         or len(cached) != len(pages)):
@@ -187,7 +188,9 @@ def main(diagnostic=None):
     passages = [normalize(passage) for passage in passages]
     if any(not passage for passage in passages):
         parser.error("Highlighted text must not be empty.")
-    with pymupdf.open(args.source) as document:
+    with stage_timer(diagnostic, 'source_open'):
+        document = pymupdf.open(args.source)
+    with document:
         if not 1 <= args.page <= len(document):
             parser.error("Page is outside the PDF.")
         if args.context_page and (not 1 <= args.context_page <= len(document)
@@ -203,34 +206,37 @@ def main(diagnostic=None):
             requested[args.context_page] = [normalize(passage) for passage in context_passages]
             if any(not passage for passage in requested[args.context_page]):
                 parser.error("Highlighted text must not be empty.")
-        for number, page_passages in requested.items():
-            resolved_passages[number] = []
-            resolved_quads[number] = []
-            expected_highlights[number] = []
-            for passage in page_passages:
-                try:
-                    actual, quads = exact_passage(document[number - 1], passage)
-                except ValueError as error:
-                    parser.error(str(error))
-                resolved_passages[number].append(actual)
-                resolved_quads[number].append(quads)
-                expected_highlights[number].extend(quads)
-        source_stat = args.source.stat()
-        reference_key = hashlib.sha256(json.dumps([
-            "baked-fit-v3", str(args.source.resolve()), source_stat.st_size,
-            source_stat.st_mtime_ns, args.page, table_mode, resolved_passages,
-            args.context_page, reference_cache.digest(args.source)
-        ], ensure_ascii=False).encode("utf-8")).hexdigest()
+        with stage_timer(diagnostic, 'passage_matching'):
+            for number, page_passages in requested.items():
+                resolved_passages[number] = []
+                resolved_quads[number] = []
+                expected_highlights[number] = []
+                for passage in page_passages:
+                    try:
+                        actual, quads = exact_passage(document[number - 1], passage)
+                    except ValueError as error:
+                        parser.error(str(error))
+                    resolved_passages[number].append(actual)
+                    resolved_quads[number].append(quads)
+                    expected_highlights[number].extend(quads)
+        with stage_timer(diagnostic, 'source_validation'):
+            source_stat = args.source.stat()
+            reference_key = hashlib.sha256(json.dumps([
+                "baked-fit-v3", str(args.source.resolve()), source_stat.st_size,
+                source_stat.st_mtime_ns, args.page, table_mode, resolved_passages,
+                args.context_page, reference_cache.digest(args.source)
+            ], ensure_ascii=False).encode("utf-8")).hexdigest()
         if args.excerpt_output and not args.output:
             cached = reusable_excerpt(args.excerpt_output.parent, reference_key, document,
-                                      excerpt_pages, set(expected_highlights), expected_highlights)
+                                      excerpt_pages, set(expected_highlights), expected_highlights, diagnostic)
             if cached:
                 display_page = excerpt_pages.index(args.page) + 1
-                retention = enforce_retention(cached, args.source, args.max_pdfs)
+                with stage_timer(diagnostic, 'retention'):
+                    retention = enforce_retention(cached, args.source, args.max_pdfs)
                 if diagnostic is not None:
                     diagnostic.update(reused=True, pages=len(excerpt_pages),
                                       pruned=len(retention["removed"]),
-                                      retention_warnings=len(retention["warnings"]))
+                                      retention_warnings=len(retention["warnings"]), verified=True)
                 print(json.dumps({"output": None, "preview": str(cached), "pdf_page": args.page,
                                   "source_pages": excerpt_pages, "verified": True, "reused": True,
                                   "browser_url": cached.as_uri() + f"#page={display_page}&view=Fit",
@@ -238,14 +244,15 @@ def main(diagnostic=None):
                 return
         page = document[args.page - 1]
         quads = expected_highlights[args.page]
-        for number, page_passages in resolved_passages.items():
-            current = document[number - 1]
-            for passage, selection_quads in zip(page_passages, resolved_quads[number]):
-                annotation = current.add_highlight_annot(selection_quads)
-                annotation.set_colors(stroke=(1, 1, 0))
-                annotation.set_opacity(0.35)
-                annotation.set_info(title="Code Reference", content=passage)
-                annotation.update()
+        with stage_timer(diagnostic, 'pdf_generation'):
+            for number, page_passages in resolved_passages.items():
+                current = document[number - 1]
+                for passage, selection_quads in zip(page_passages, resolved_quads[number]):
+                    annotation = current.add_highlight_annot(selection_quads)
+                    annotation.set_colors(stroke=(1, 1, 0))
+                    annotation.set_opacity(0.35)
+                    annotation.set_info(title="Code Reference", content=passage)
+                    annotation.update()
         excerpt_pages = sorted({args.page, args.context_page} - {None})
         excerpt_originals = [
             (document[n - 1].get_text(), document[n - 1].read_contents(),
@@ -266,7 +273,7 @@ def main(diagnostic=None):
                                   f"[{page.xref} 0 R /XYZ null null 1]")
         if args.excerpt_output:
             args.excerpt_output.parent.mkdir(parents=True, exist_ok=True)
-            with pymupdf.open() as preview:
+            with stage_timer(diagnostic, 'pdf_generation'), pymupdf.open() as preview:
                 preview.insert_pdf(document, from_page=excerpt_pages[0] - 1, to_page=excerpt_pages[-1] - 1)
                 preview.set_metadata({"title": f"OBC reference excerpt - original PDF page {args.page}",
                                       "keywords": MANAGED_TAG,
@@ -279,30 +286,32 @@ def main(diagnostic=None):
                 preview.save(args.excerpt_output, garbage=3, deflate=True)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            document.save(args.output, garbage=3, deflate=True)
+            with stage_timer(diagnostic, 'pdf_generation'):
+                document.save(args.output, garbage=3, deflate=True)
     if args.output:
         with pymupdf.open(args.output) as result:
-            marked_page = result[args.page - 1]
-            assert len(result) == original_count, "Page count changed"
-            assert marked_page.get_text() == original_text, "Page text changed"
-            assert marked_page.read_contents() == original_content, "Original page graphics changed"
-            assert marked_page.mediabox == original_mediabox, "Page MediaBox changed"
-            assert marked_page.cropbox == original_cropbox, "Page CropBox changed"
-            assert marked_page.rotation == original_rotation, "Page rotation changed"
-            kind, destination = result.xref_get_key(result.pdf_catalog(), "OpenAction")
-            assert kind == "array" and destination.startswith(f"[{marked_page.xref} 0 R"), "Opening page incorrect"
-            assert all(any(a.info.get("content") == passage and a.type[0] == 8
-                           for a in marked_page.annots()) for passage in resolved_passages[args.page]), "Highlight missing"
+            with stage_timer(diagnostic, 'verification'):
+                marked_page = result[args.page - 1]
+                assert len(result) == original_count, "Page count changed"
+                assert marked_page.get_text() == original_text, "Page text changed"
+                assert marked_page.read_contents() == original_content, "Original page graphics changed"
+                assert marked_page.mediabox == original_mediabox, "Page MediaBox changed"
+                assert marked_page.cropbox == original_cropbox, "Page CropBox changed"
+                assert marked_page.rotation == original_rotation, "Page rotation changed"
+                kind, destination = result.xref_get_key(result.pdf_catalog(), "OpenAction")
+                assert kind == "array" and destination.startswith(f"[{marked_page.xref} 0 R"), "Opening page incorrect"
+                assert all(any(a.info.get("content") == passage and a.type[0] == 8
+                               for a in marked_page.annots()) for passage in resolved_passages[args.page]), "Highlight missing"
             if args.preview_output:
                 args.preview_output.parent.mkdir(parents=True, exist_ok=True)
-                with pymupdf.open() as preview:
+                with stage_timer(diagnostic, 'pdf_generation'), pymupdf.open() as preview:
                     preview.insert_pdf(result, from_page=excerpt_pages[0] - 1, to_page=excerpt_pages[-1] - 1)
                     preview.set_metadata({"title": f"OBC reference excerpt - original PDF page {args.page}",
                                           "subject": "Highlighted reference excerpt; full context is in the companion volume."})
                     preview.save(args.preview_output, garbage=3, deflate=True)
     preview_path = args.excerpt_output or args.preview_output
     if preview_path:
-        with pymupdf.open(preview_path) as preview:
+        with stage_timer(diagnostic, 'verification'), pymupdf.open(preview_path) as preview:
             assert len(preview) == len(excerpt_pages), "Excerpt page count changed"
             for index, expected in enumerate(excerpt_originals):
                 current = preview[index]
@@ -333,10 +342,14 @@ def main(diagnostic=None):
     cache_warning = None
     if args.excerpt_output:
         try:
-            reference_cache.register(args.excerpt_output, reference_key, pymupdf)
+            with stage_timer(diagnostic, 'excerpt_registration'):
+                reference_cache.register(args.excerpt_output, reference_key, pymupdf)
         except Exception as error:
             cache_warning = type(error).__name__
-    retention = enforce_retention(args.excerpt_output, args.source, args.max_pdfs) if args.excerpt_output else None
+    retention = None
+    if args.excerpt_output:
+        with stage_timer(diagnostic, 'retention'):
+            retention = enforce_retention(args.excerpt_output, args.source, args.max_pdfs)
     if diagnostic is not None:
         diagnostic.update(reused=False, pages=len(excerpt_pages) if preview_path else original_count,
                           verified=True, pruned=len(retention["removed"]) if retention else 0,

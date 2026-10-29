@@ -45,6 +45,121 @@ class StructuralRetrieval(unittest.TestCase):
     def tearDown(self):
         self.conn.close();search.CACHE_PATH=self.previous;self.temp.cleanup()
 
+    def append_pages(self, texts):
+        key = str(self.source.resolve())
+        pages = []
+        for text in texts:
+            self.texts.append(text)
+            page = len(self.texts)
+            cur = self.conn.execute('INSERT INTO page_text VALUES (?,?,?)', (key, page, text))
+            self.conn.execute('INSERT INTO page_lookup VALUES (?,?,?)', (key, page, cur.lastrowid))
+            pages.append(page)
+        self.conn.execute('UPDATE sources SET pages=? WHERE path=?', (len(self.texts), key))
+        provision_index.invalidate(self.conn, self.source)
+        self.conn.commit()
+        return pages
+
+    def test_sa1_and_reversed_objective_headers_do_not_establish_articles(self):
+        pages = self.append_pages([
+            '2024\nMMAH Supplementary Standard SA-1\nSA-1 - Page 91\n'
+            'Acceptable\nSolutions\nObjectives and Functional Statements\n'
+            '9.9.9.1.\nTravel Limit to Exits or Egress Doors\n(1)\n[F10-OS3.7]\n',
+            'Division B\nAcceptable Solutions\nObjectives and Functional\nStatements\n'
+            '9.9.9.1. Travel Limit to Exits or Egress Doors\n(1)\n[F10-OS3.7]\n',
+            'Division B\nProvision\nFunctional Statements\nand Objectives\n'
+            '9.9.9.1. Travel Limit to Exits or Egress Doors\n(1)\n[F10-OS3.7]\n',
+        ])
+        self.assertEqual(search.retrieve(self.conn, [self.source], reference='9.9.9.1.(1)'), [])
+        raw = search.retrieve(self.conn, [self.source], pages=pages)
+        self.assertEqual([row['pdf_page'] for row in raw], pages)
+        self.assertTrue(all('[F10-OS3.7]' in row['text'] for row in raw))
+
+    def test_binding_travel_provision_ranks_above_searchable_mapping(self):
+        mapping, operative = self.append_pages([
+            'MMAH Supplementary Standard SA-1\nAcceptable Solutions\n'
+            'Objectives and Functional Statements\n'
+            '9.9.9.1. Travel Limit to Exits or Egress Doors\n(1)\n[F10-OS3.7]\n',
+            'Division B - Part 9\n9.9.9.1. Travel Limit to Exits or Egress Doors\n'
+            '(1) Travel to exits or egress doors follows this artificial fixture rule.\n'
+            '(2) An exception changes this artificial fixture rule.\n',
+        ])
+        rows = search.retrieve(self.conn, [self.source], query='Part 9 travel limit exits egress doors',
+                               focused=True, max_results=20)
+        self.assertEqual(rows[0]['pdf_page'], operative)
+        self.assertIn('(2) An exception', rows[0]['provisions'][0]['text'])
+        mapped = next(row for row in rows if row['pdf_page'] == mapping)
+        self.assertEqual(mapped['provisions'][0]['kind'], 'objective_mapping')
+        self.assertIsNone(mapped['provisions'][0]['reference'])
+        self.assertIn('ranking_caution', mapped['provisions'][0])
+        legacy = search.retrieve(self.conn, [self.source], keywords=['[F10-OS3.7]'])
+        self.assertTrue(any(row['pdf_page'] == mapping for row in legacy))
+
+    def test_sa1_page_resets_article_continuation_state(self):
+        actual, mapping, following = self.append_pages([
+            'Division B - Part 9\n9.9.9.1. Travel Limit to Exits or Egress Doors\n'
+            '(1) This artificial fixture is an operative paragraph.\n',
+            'MMAH Supplementary Standard SA-1\n'
+            '9.9.9.1. Travel Limit to Exits or Egress Doors\n(1)\n[F10-OS3.7]\n',
+            '(2)\n[F10-OS3.7]\n',
+        ])
+        rows = search.retrieve(self.conn, [self.source], reference='9.9.9.1.', max_results=10)
+        self.assertEqual([row['pdf_page'] for row in rows], [actual])
+        self.assertNotIn(mapping, rows[0]['provisions'][0]['context_pages'])
+        self.assertNotIn(following, rows[0]['provisions'][0]['context_pages'])
+
+    def test_governing_code_table_is_not_discarded_as_sa1_mapping(self):
+        heading, table = self.append_pages([
+            'Division B - Part 3\n3.10.1.1. Governing Table\n'
+            '(1) This artificial requirement refers to Table 3.10.1.1.\n',
+            'Division B\nTable 3.10.1.1. (Continued)\nProvision\n'
+            'Functional Statements and Objectives\n'
+            '3.6.2.1. Fire Separations Around Service Rooms\n(6)\n[F05-OS1.5]\n',
+        ])
+        rows = search.retrieve(self.conn, [self.source], reference='3.10.1.1.', max_results=10)
+        self.assertEqual([row['pdf_page'] for row in rows], [heading, table])
+        self.assertEqual(rows[1]['provisions'][0]['text'], self.texts[table - 1])
+        wrong = search.retrieve(self.conn, [self.source], reference='3.6.2.1.', max_results=10)
+        self.assertNotIn(table, [row['pdf_page'] for row in wrong])
+
+    def test_objective_terms_in_prose_do_not_hide_a_real_article(self):
+        page = self.append_pages([
+            'Division B - Part 9\n9.9.9.1. Travel Limit to Exits or Egress Doors\n'
+            '(1) This artificial provision discusses Objectives and Functional Statements '
+            'and Acceptable Solutions in prose, not a mapping table.\n',
+        ])[0]
+        rows = search.retrieve(self.conn, [self.source], reference='9.9.9.1.')
+        self.assertEqual([row['pdf_page'] for row in rows], [page])
+
+    def test_old_mapping_metadata_rebuilds_without_reextracting_pdf(self):
+        page = self.append_pages([
+            'MMAH Supplementary Standard SA-1\n'
+            '9.9.9.1. Travel Limit to Exits or Egress Doors\n(1)\n[F10-OS3.7]\n',
+        ])[0]
+        provision_index.ensure(self.conn, self.source)
+        key = str(self.source.resolve())
+        self.conn.execute('INSERT INTO provision_spans VALUES (?,?,?,?,?,?,?,?)',
+                          (key, page, 0, len(self.texts[page - 1]), '9.9.9.1',
+                           'Travel Limit to Exits or Egress Doors', 'B', 'article'))
+        self.conn.execute("UPDATE provision_meta SET version='4' WHERE source=?", (key,))
+        self.conn.commit()
+        self.assertEqual(search.retrieve(self.conn, [self.source], reference='9.9.9.1.'), [])
+
+    def test_bundled_volume_routing_notice_identifies_requirement_source(self):
+        selected = search.LIBRARY_ROOT / '2024 OBC.Volume 2.pdf'
+        expected = str((search.LIBRARY_ROOT / '2024 OBC.Volume 1.pdf').resolve())
+        for request in ('Part 9 travel distance exit', 'Division B 9.9.9.1.(1)'):
+            notice = search.source_routing_notice([selected], request)
+            self.assertEqual(notice['selected_source'], str(selected.resolve()))
+            self.assertEqual(notice['requirement_source'], expected)
+
+    def test_routing_notice_does_not_substitute_attached_or_nbc_sources(self):
+        attached = Path(self.temp.name) / '2024 OBC.Volume 2.pdf'
+        for sources in ([attached], [search.LIBRARY_ROOT / 'NBC 2020 Part 1.pdf'],
+                        [search.LIBRARY_ROOT / '2024 OBC.Volume 1.pdf']):
+            self.assertIsNone(search.source_routing_notice(sources, 'Part 9 travel distance exit'))
+        self.assertIsNone(search.source_routing_notice(
+            [search.LIBRARY_ROOT / '2024 OBC.Volume 2.pdf'], 'SA-1 explanatory material'))
+
     def test_sentence_routes_to_continuation_not_page_header_or_mention(self):
         rows=search.retrieve(self.conn,[self.source],query='Explain Sentence 3.6.2.1.(6).',focused=True,max_results=3)
         self.assertEqual(rows[0]['pdf_page'],2)

@@ -9,25 +9,30 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 import search_pdf as search
 import highlight_sentence as highlight
 import reference_cache
+import diagnostics
+import cache_safety
 import pymupdf
 
 SENTENCE = 'The minimum width of a public corridor shall be 1 100 mm.'
 
 
-def invoke(module, *args):
+def invoke(module, *args, diagnostic=None):
     previous = sys.argv
     out = io.StringIO()
     sys.argv = [module.__file__, *map(str, args)]
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            module.main()
+            module.main(diagnostic)
         return json.loads(out.getvalue())
     finally:
         sys.argv = previous
@@ -63,6 +68,49 @@ class Regression(unittest.TestCase):
     def excerpt(self, name='a.pdf', *extra):
         return invoke(highlight, self.source, '--page', 1, '--text', SENTENCE,
                       '--excerpt-output', self.directory / 'references' / name, *extra)
+
+    def test_default_cache_path_uses_local_user_data(self):
+        for user in ('user-a', 'user-b'):
+            local_data = self.directory / user / 'AppData' / 'Local'
+            with patch.dict(os.environ, {'LOCALAPPDATA': str(local_data)}), \
+                 patch.object(search, 'SKILL_ROOT', self.directory / 'installed-skill'):
+                self.assertEqual(search.default_cache_path(),
+                                 local_data / 'WZMH' / 'CodeAI' / 'cache' / 'pdf_text_index.sqlite3')
+
+    def test_first_lookup_automatically_creates_user_cache_outside_skill(self):
+        install = self.directory / 'installed-skill'
+        with patch.dict(os.environ, {'LOCALAPPDATA': str(self.directory / 'user-data')}), \
+             patch.object(search, 'SKILL_ROOT', install):
+            cache = search.default_cache_path()
+            with patch.object(search, 'CACHE_PATH', cache):
+                cold = self.search('--keyword', 'public corridor')
+                warm = self.search('--keyword', 'public corridor')
+        self.assertTrue(cache.is_file())
+        self.assertTrue(cold['indexed_pages'])
+        self.assertFalse(warm['indexed_pages'])
+        self.assertEqual(cold['results'], warm['results'])
+        self.assertFalse(install.exists())
+
+    def test_separate_chat_processes_reuse_user_cache_without_sharing_between_users(self):
+        chats = [self.directory / 'chat-one', self.directory / 'chat-two']
+        for folder in chats:
+            folder.mkdir()
+        command = [sys.executable, '-B', '-X', 'utf8', str(SCRIPTS / 'search_pdf.py'),
+                   '--source', str(self.source), '--keyword', 'public corridor', '--json']
+        results = []
+        for user, folder in [('user-a', chats[0]), ('user-a', chats[1]), ('user-b', chats[0])]:
+            env = os.environ.copy()
+            env['LOCALAPPDATA'] = str(self.directory / user)
+            done = subprocess.run(command, cwd=folder, env=env, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            results.append(json.loads(done.stdout))
+        self.assertTrue(results[0]['indexed_pages'])
+        self.assertFalse(results[1]['indexed_pages'])
+        self.assertEqual(results[1]['reused_sources'], [str(self.source.resolve())])
+        self.assertTrue(results[2]['indexed_pages'])
+        self.assertEqual(results[0]['results'], results[1]['results'])
+        for user in ('user-a', 'user-b'):
+            self.assertTrue((self.directory / user / 'WZMH' / 'CodeAI' / 'cache' / 'pdf_text_index.sqlite3').is_file())
 
     def test_keyword_regex_full_page_and_exact_pages(self):
         keyword = self.search('--keyword', 'public corridor')
@@ -127,6 +175,50 @@ class Regression(unittest.TestCase):
         warm = self.search('--cache-path', chat_cache, '--keyword', 'public corridor')
         self.assertFalse(warm['indexed_pages'])
         self.assertEqual(first['results'], warm['results'])
+
+    def test_shared_index_does_not_retrieve_unselected_test_pdf(self):
+        decoy = self.directory / 'tests' / 'sample-answer.pdf'
+        decoy.parent.mkdir()
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.insert_text((50, 60), '3.3.1.9. Corridors\n(1) The minimum width of a public corridor shall be 9 999 mm.', fontsize=9)
+            document.save(decoy)
+        invoke(search, '--source', decoy, '--index-only', '--json')
+        for args in [('--keyword', 'public corridor'), ('--regex', 'public corridor'),
+                     ('--query', 'minimum width public corridor', '--focused'),
+                     ('--reference', '3.3.1.9.'), ('--pages', 1)]:
+            with self.subTest(mode=args[0]):
+                rows = self.search(*args)['results']
+                self.assertTrue(rows)
+                self.assertTrue(all(row['path'] == str(self.source.resolve()) for row in rows))
+                self.assertNotIn('9 999', json.dumps(rows))
+
+    def test_default_pdf_discovery_does_not_scan_tests_or_work(self):
+        library = self.directory / 'assets' / 'source_documents'
+        library.mkdir(parents=True)
+        bundled = library / 'code.pdf'
+        bundled.write_bytes(self.source.read_bytes())
+        for folder in ('tests', 'work'):
+            target = self.directory / folder
+            target.mkdir()
+            (target / 'sample-answer.pdf').write_bytes(self.source.read_bytes())
+        with patch.object(search, 'LIBRARY_ROOT', library):
+            self.assertEqual(search.bundled_sources(), [bundled])
+
+    def test_cli_routing_notice_preserves_explicit_source_selection(self):
+        library = self.directory / 'library'
+        library.mkdir()
+        self.source = self.source.rename(library / '2024 OBC.Volume 2.pdf')
+        with patch.object(search, 'LIBRARY_ROOT', library):
+            result = self.search('--query', 'Part 9 public corridor', '--focused')
+        notice = result['source_routing_notice']
+        self.assertEqual(notice['selected_source'], str(self.source.resolve()))
+        self.assertEqual(notice['requirement_source'],
+                         str((library / '2024 OBC.Volume 1.pdf').resolve()))
+        self.assertTrue(result['results'])
+        self.assertTrue(all(row['path'] == str(self.source.resolve()) for row in result['results']))
+        self.assertIn('indexed_pages', result)
+        self.assertIn('reused_sources', result)
 
     def test_same_stat_source_change_invalidates_search_index(self):
         self.search('--index-only')
@@ -301,6 +393,399 @@ class Regression(unittest.TestCase):
         self.assertEqual(result['responses'][0]['results'][0]['pdf_page'], 2)
         with self.assertRaises(SystemExit):
             self.search('--batch-json', '{"requests":[{"keywords":["door"],"pages":[1]}]}')
+
+    def test_damaged_index_is_preserved_and_rebuilt_without_touching_pdfs(self):
+        excerpt = Path(self.excerpt()['preview'])
+        original_hash = reference_cache.digest(self.source)
+        excerpt_hash = reference_cache.digest(excerpt)
+        cache = search.CACHE_PATH
+        cache.parent.mkdir(parents=True)
+        damaged = b'not a SQLite database: preserve this evidence'
+        cache.write_bytes(damaged)
+        result = self.search('--reference', '3.3.1.9.(1)', '--with-context')
+        backup = Path(result['cache_recovery']['preserved_index'])
+        self.assertEqual(backup.read_bytes(), damaged)
+        self.assertEqual(result['results'][0]['pdf_page'], 1)
+        self.assertIn(SENTENCE, result['results'][0]['provisions'][0]['text'])
+        self.assertEqual(reference_cache.digest(self.source), original_hash)
+        self.assertEqual(reference_cache.digest(excerpt), excerpt_hash)
+        warm = self.search('--keyword', 'public corridor')
+        self.assertNotIn('cache_recovery', warm)
+        self.assertFalse(warm['indexed_pages'])
+        self.assertEqual(len(list(cache.parent.glob('*.corrupt-*.bak'))), 1)
+
+    @staticmethod
+    def sqlite_error(code):
+        error = sqlite3.DatabaseError('isolated simulated SQLite failure')
+        error.sqlite_errorcode = code
+        return error
+
+    def test_corruption_during_retrieval_retries_whole_batch_once(self):
+        self.search('--index-only')
+        real_retrieve = search.retrieve
+        calls = []
+        def retrieve(*args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise self.sqlite_error(sqlite3.SQLITE_CORRUPT)
+            return real_retrieve(*args, **kwargs)
+        jobs = [{'id': 'one', 'pages': [1]}, {'id': 'two', 'pages': [2]}]
+        with patch.object(search, 'retrieve', side_effect=retrieve):
+            result = self.search('--batch-json', json.dumps(jobs))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual([r['id'] for r in result['responses']], ['one', 'two'])
+        self.assertEqual([r['results'][0]['pdf_page'] for r in result['responses']], [1, 2])
+        self.assertTrue(result['cache_recovery']['recovered'])
+
+    def test_busy_and_other_sqlite_errors_never_quarantine(self):
+        self.search('--index-only')
+        cache = search.CACHE_PATH
+        before = cache.read_bytes()
+        for code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+                     sqlite3.SQLITE_FULL, sqlite3.SQLITE_READONLY, sqlite3.SQLITE_ERROR):
+            with self.subTest(code=code), patch.object(search, 'run_prepared',
+                    side_effect=self.sqlite_error(code)) as run, patch.object(search.time, 'sleep'):
+                with self.assertRaises(SystemExit) as failure:
+                    self.search('--pages', 1)
+                self.assertEqual(failure.exception.code, 2)
+                self.assertEqual(run.call_count, 3 if cache_safety.is_busy(self.sqlite_error(code)) else 1)
+            self.assertEqual(cache.read_bytes(), before)
+            self.assertFalse(list(cache.parent.glob('*.corrupt-*.bak')))
+
+    def test_repeated_corruption_stops_after_one_preserved_backup(self):
+        self.search('--index-only')
+        with patch.object(search, 'run_prepared', side_effect=self.sqlite_error(sqlite3.SQLITE_CORRUPT)) as run:
+            with self.assertRaises(SystemExit):
+                self.search('--pages', 1)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(len(list(search.CACHE_PATH.parent.glob('*.corrupt-*.bak'))), 1)
+
+    def test_cache_paths_cannot_alias_original_pdf(self):
+        before = reference_cache.digest(self.source)
+        alias = self.directory / 'hardlink.sqlite3'
+        os.link(self.source, alias)
+        for path in (self.source, alias, search.LIBRARY_ROOT / 'unsafe.sqlite3'):
+            with self.subTest(path=path), self.assertRaises(SystemExit):
+                self.search('--cache-path', path, '--pages', 1)
+        self.assertEqual(reference_cache.digest(self.source), before)
+        self.assertFalse(search.CACHE_PATH.exists())
+
+    def test_quarantine_preserves_main_file_and_all_sidecars(self):
+        cache = search.CACHE_PATH
+        cache.parent.mkdir(parents=True)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            Path(str(cache) + suffix).write_bytes(('evidence' + suffix).encode())
+        with cache_safety.cache_lock(cache):
+            backup = cache_safety.quarantine_cache(cache)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            self.assertEqual(Path(str(backup) + suffix).read_bytes(), ('evidence' + suffix).encode())
+            self.assertFalse(Path(str(cache) + suffix).exists())
+
+    def test_failed_preservation_rolls_back_without_rebuilding(self):
+        cache = search.CACHE_PATH
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b'damaged')
+        wal = Path(str(cache) + '-wal')
+        wal.write_bytes(b'wal evidence')
+        original_rename = Path.rename
+        def denied(path, target):
+            if path == cache.resolve():
+                raise PermissionError('isolated denial')
+            return original_rename(path, target)
+        with patch.object(Path, 'rename', denied), self.assertRaises(cache_safety.CacheRecoveryError):
+            cache_safety.quarantine_cache(cache)
+        self.assertEqual(cache.read_bytes(), b'damaged')
+        self.assertEqual(wal.read_bytes(), b'wal evidence')
+        self.assertFalse(list(cache.parent.glob('*.corrupt-*')))
+
+    def test_permission_error_never_resets_cache(self):
+        self.search('--index-only')
+        before = search.CACHE_PATH.read_bytes()
+        with patch.object(search, 'connect', side_effect=PermissionError('isolated denial')):
+            with self.assertRaises(SystemExit):
+                self.search('--pages', 1)
+        self.assertEqual(search.CACHE_PATH.read_bytes(), before)
+        self.assertFalse(list(search.CACHE_PATH.parent.glob('*.corrupt-*')))
+
+    def test_lock_timeout_returns_no_partial_answer_or_reset(self):
+        self.search('--index-only')
+        cache = search.CACHE_PATH
+        before = cache.read_bytes()
+        with cache_safety.cache_lock(cache), patch.object(cache_safety, 'LOCK_TIMEOUT', 0.04):
+            # The sidecar guard covers even readers, making quarantine safe across chats.
+            out, errors = io.StringIO(), io.StringIO()
+            metadata = {}
+            with patch.object(sys, 'argv', ['search', '--source', str(self.source), '--pages', '1', '--json']), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(errors):
+                started = time.monotonic()
+                with self.assertRaises(SystemExit):
+                    search.main(metadata)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertGreaterEqual(metadata['cache_wait_ms'], 35)
+            self.assertEqual(out.getvalue(), '')
+            self.assertIn('busy', errors.getvalue())
+            self.assertEqual(cache.read_bytes(), before)
+        self.assertFalse(list(cache.parent.glob('*.corrupt-*')))
+        self.assertTrue(self.search('--pages', 1)['results'])
+
+    def test_parallel_cli_lookups_share_one_index_and_reuse_it(self):
+        command = [sys.executable, '-B', '-X', 'utf8', str(SCRIPTS / 'search_pdf.py'),
+                   '--source', str(self.source), '--cache-path', str(search.CACHE_PATH),
+                   '--keyword', 'public corridor', '--json']
+        env = dict(os.environ, LOCALAPPDATA=str(self.directory / 'runtime'))
+        processes = []
+        try:
+            with cache_safety.cache_lock(search.CACHE_PATH):
+                processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                              text=True, env=env) for _ in range(2)]
+            results = []
+            for process in processes:
+                out, error = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 0, error)
+                results.append(json.loads(out))
+            self.assertEqual(sum(bool(r['indexed_pages']) for r in results), 1)
+            self.assertEqual(results[0]['results'], results[1]['results'])
+            self.assertFalse(list(search.CACHE_PATH.parent.glob('*.corrupt-*')))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def test_process_exit_releases_lock_even_with_sidecar_left_behind(self):
+        code = ('import os,sys;sys.path.insert(0,sys.argv[1]);from cache_safety import cache_lock;'
+                '\nwith cache_lock(sys.argv[2]):os._exit(0)')
+        result = subprocess.run([sys.executable, '-B', '-c', code, str(SCRIPTS), str(search.CACHE_PATH)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(Path(str(search.CACHE_PATH) + '.lock').exists())
+        self.assertTrue(self.search('--pages', 1)['results'])
+
+    def test_external_writer_contention_recovers_after_bounded_retry(self):
+        self.search('--index-only')
+        conn = sqlite3.connect(search.CACHE_PATH, check_same_thread=False)
+        conn.execute('BEGIN IMMEDIATE')
+        released = threading.Event()
+        def release():
+            time.sleep(0.35)
+            conn.rollback()
+            released.set()
+        worker = threading.Thread(target=release)
+        worker.start()
+        try:
+            # Force a source refresh, which needs the external writer's SQLite lock.
+            result = self.search('--rebuild', '--keyword', 'public corridor')
+            self.assertTrue(released.is_set())
+            self.assertEqual(result['results'][0]['pdf_page'], 1)
+            self.assertNotIn('cache_recovery', result)
+        finally:
+            worker.join(timeout=5)
+            conn.close()
+
+    def test_extended_error_codes_are_classified_by_primary_code(self):
+        self.assertTrue(cache_safety.is_busy(self.sqlite_error(sqlite3.SQLITE_BUSY | (2 << 8))))
+        self.assertTrue(cache_safety.is_corrupt(self.sqlite_error(sqlite3.SQLITE_CORRUPT | (1 << 8))))
+        self.assertFalse(cache_safety.is_corrupt(sqlite3.DatabaseError('malformed, but no confirmed code')))
+
+    def test_recovery_diagnostics_record_status_without_source_text_or_paths(self):
+        search.CACHE_PATH.parent.mkdir(parents=True)
+        search.CACHE_PATH.write_bytes(b'broken index')
+        log = self.directory / 'diagnostics.jsonl'
+        with patch.object(diagnostics, 'LOG_PATH', log), \
+             patch.object(sys, 'argv', ['search', '--source', str(self.source), '--keyword', 'public corridor', '--json']), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with diagnostics.diagnostic_run('search') as metadata:
+                search.main(metadata)
+        raw = log.read_text(encoding='utf-8')
+        entry = json.loads(raw)
+        self.assertTrue(entry['cache_recovered'])
+        self.assertEqual(entry['cache_busy_retries'], 0)
+        self.assertEqual(entry['status'], 'ok')
+        self.assertIn('cache_wait_ms', entry)
+        self.assertNotIn('corridor', raw)
+        self.assertNotIn('preserved_index', raw)
+        self.assertNotIn(str(self.source), raw)
+
+    def test_search_stage_timings_distinguish_cold_warm_and_context_reads(self):
+        cold, warm = {}, {}
+        args = ('--source', self.source, '--query', 'minimum width public corridor',
+                '--focused', '--with-context', '--json')
+        first = invoke(search, *args, diagnostic=cold)
+        second = invoke(search, *args, diagnostic=warm)
+        expected = {'cache_open', 'source_validation', 'cache_commit', 'retrieval', 'context_loading'}
+        self.assertTrue(expected <= cold['stages_ms'].keys())
+        self.assertTrue(expected <= warm['stages_ms'].keys())
+        self.assertIn('indexing', cold['stages_ms'])
+        self.assertNotIn('indexing', warm['stages_ms'])
+        self.assertEqual(first['results'], second['results'])
+        self.assertNotIn('stages_ms', second)
+        self.assertTrue(all(value >= 0 for value in cold['stages_ms'].values()))
+
+    def test_batch_timings_do_not_add_source_checks_or_searches(self):
+        fields = {}
+        jobs = [{'keywords': ['public corridor']}, {'pages': [2]}]
+        with patch.object(search, 'needs_index', wraps=search.needs_index) as freshness, \
+             patch.object(search, 'retrieve', wraps=search.retrieve) as retrieve:
+            result = invoke(search, '--source', self.source, '--batch-json', json.dumps(jobs), diagnostic=fields)
+        self.assertEqual(freshness.call_count, 1)
+        self.assertEqual(retrieve.call_count, 2)
+        self.assertEqual(len(result['responses']), 2)
+        self.assertIn('retrieval', fields['stages_ms'])
+        self.assertNotIn('context_loading', fields['stages_ms'])
+
+    def test_highlight_timings_preserve_verification_on_cache_reuse(self):
+        cold, warm = {}, {}
+        args = (self.source, '--page', 1, '--text', SENTENCE, '--excerpt-output')
+        first = invoke(highlight, *args, self.directory / 'references' / 'timed.pdf', diagnostic=cold)
+        second = invoke(highlight, *args, self.directory / 'references' / 'reused.pdf', diagnostic=warm)
+        self.assertFalse(first['reused'])
+        self.assertTrue(second['reused'])
+        self.assertEqual(first['preview'], second['preview'])
+        self.assertTrue(warm['verified'])
+        for fields in (cold, warm):
+            self.assertTrue({'source_open', 'source_validation', 'passage_matching', 'verification', 'retention'}
+                            <= fields['stages_ms'].keys())
+        self.assertIn('pdf_generation', cold['stages_ms'])
+        self.assertIn('excerpt_registration', cold['stages_ms'])
+        self.assertIn('excerpt_lookup', warm['stages_ms'])
+        self.assertNotIn('pdf_generation', warm['stages_ms'])
+        self.assertFalse((self.directory / 'references' / 'reused.pdf').exists())
+        self.assertNotIn('stages_ms', first)
+        self.assertNotIn('stages_ms', second)
+
+    def test_failed_pdf_verification_is_timed_and_still_stops_output(self):
+        fields = {}
+        target = self.directory / 'references' / 'failure.pdf'
+        with patch.object(highlight, 'covers_highlights', return_value=False):
+            with self.assertRaisesRegex(AssertionError, 'Complete highlight coverage missing'):
+                invoke(highlight, self.source, '--page', 1, '--text', SENTENCE,
+                       '--excerpt-output', target, diagnostic=fields)
+        self.assertIn('verification', fields['stages_ms'])
+        self.assertNotIn('verified', fields)
+        self.assertNotIn('excerpt_registration', fields['stages_ms'])
+
+    def test_cli_writes_stage_timings_only_to_local_log(self):
+        env = dict(os.environ, LOCALAPPDATA=str(self.directory / 'runtime'))
+        command = [sys.executable, '-B', '-X', 'utf8', str(SCRIPTS / 'search_pdf.py'),
+                   '--source', str(self.source), '--keyword', 'public corridor', '--json']
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('stages_ms', json.loads(result.stdout))
+        path = Path(env['LOCALAPPDATA']) / 'WZMH' / 'CodeAI' / 'logs' / 'diagnostics.jsonl'
+        raw = path.read_text(encoding='utf-8')
+        row = json.loads(raw)
+        self.assertIn('retrieval', row['stages_ms'])
+        self.assertIn('indexing', row['stages_ms'])
+        self.assertNotIn('public corridor', raw)
+        self.assertNotIn(str(self.source), raw)
+        self.assertEqual(row['status'], 'ok')
+
+
+class DiagnosticsRegression(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='wzmh-diagnostics-')
+        self.directory = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_stage_timer_accumulates_elapsed_time_even_when_stage_fails(self):
+        fields = {}
+        with patch.object(diagnostics.time, 'perf_counter', side_effect=[10, 10.125, 20, 20.25]):
+            with diagnostics.stage_timer(fields, 'retrieval'):
+                pass
+            with self.assertRaisesRegex(ValueError, 'original error'):
+                with diagnostics.stage_timer(fields, 'retrieval'):
+                    raise ValueError('original error')
+        self.assertEqual(fields['stages_ms'], {'retrieval': 375.0})
+
+    def test_disabled_stage_timings_do_not_read_clock_or_hide_errors(self):
+        with patch.object(diagnostics.time, 'perf_counter', side_effect=AssertionError('clock not needed')):
+            with diagnostics.stage_timer(None, 'retrieval'):
+                pass
+            with self.assertRaisesRegex(ValueError, 'original error'):
+                with diagnostics.stage_timer(None, 'retrieval'):
+                    raise ValueError('original error')
+
+    def test_localappdata_location_is_independent_of_skill_install(self):
+        local_data = self.directory / 'user' / 'AppData' / 'Local'
+        install = self.directory / 'installed-skill'
+        with patch.dict(os.environ, {'LOCALAPPDATA': str(local_data)}), \
+             patch.object(diagnostics, '__file__', str(install / 'scripts' / 'diagnostics.py')):
+            target = diagnostics.default_log_path()
+        self.assertEqual(target, local_data / 'WZMH' / 'CodeAI' / 'logs' / 'diagnostics.jsonl')
+        self.assertFalse(target.parent.exists())
+        with patch.object(diagnostics, 'LOG_PATH', target):
+            with diagnostics.diagnostic_run('search') as fields:
+                fields.update(mode='pages', result_pages=1)
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8'))['status'], 'ok')
+        self.assertFalse(install.exists())
+
+    def test_distinct_users_get_distinct_logs(self):
+        paths = []
+        for user in ('user-a', 'user-b'):
+            with patch.dict(os.environ, {'LOCALAPPDATA': str(self.directory / user)}):
+                target = diagnostics.default_log_path()
+            with patch.object(diagnostics, 'LOG_PATH', target):
+                with diagnostics.diagnostic_run('search'):
+                    pass
+            paths.append(target)
+        self.assertNotEqual(*paths)
+        self.assertTrue(all(path.is_file() for path in paths))
+
+    def test_windows_missing_localappdata_falls_back_to_user_profile(self):
+        home = self.directory / 'user'
+        with patch.dict(os.environ, {}, clear=True), patch.object(sys, 'platform', 'win32'), \
+             patch.object(Path, 'home', return_value=home):
+            self.assertEqual(diagnostics.default_log_path(),
+                             home / 'AppData' / 'Local' / 'WZMH' / 'CodeAI' / 'logs' / 'diagnostics.jsonl')
+
+    def test_non_windows_fallback_stays_in_user_state_folder(self):
+        home = self.directory / 'user'
+        with patch.dict(os.environ, {}, clear=True), patch.object(sys, 'platform', 'linux'), \
+             patch.object(Path, 'home', return_value=home):
+            self.assertEqual(diagnostics.default_log_path(),
+                             home / '.local' / 'state' / 'WZMH' / 'CodeAI' / 'logs' / 'diagnostics.jsonl')
+            with patch.dict(os.environ, {'XDG_STATE_HOME': str(home / 'state')}):
+                self.assertEqual(diagnostics.default_log_path(),
+                                 home / 'state' / 'WZMH' / 'CodeAI' / 'logs' / 'diagnostics.jsonl')
+
+    def test_success_and_error_logs_do_not_record_exception_messages(self):
+        target = self.directory / 'logs' / 'diagnostics.jsonl'
+        with patch.object(diagnostics, 'LOG_PATH', target):
+            with diagnostics.diagnostic_run('search') as fields:
+                fields.update(mode='pages', result_pages=1, reused_sources=1)
+            with self.assertRaises(ValueError):
+                with diagnostics.diagnostic_run('highlight'):
+                    raise ValueError('PRIVATE_SENTINEL_DO_NOT_LOG')
+        raw = target.read_text(encoding='utf-8')
+        rows = [json.loads(line) for line in raw.splitlines()]
+        self.assertEqual([row['status'] for row in rows], ['ok', 'error'])
+        self.assertEqual(rows[-1]['error_type'], 'ValueError')
+        self.assertTrue(all('elapsed_ms' in row and 'time_utc' in row for row in rows))
+        self.assertNotIn('PRIVATE_SENTINEL_DO_NOT_LOG', raw)
+
+    def test_log_rotation_remains_bounded(self):
+        target = self.directory / 'logs' / 'diagnostics.jsonl'
+        with patch.object(diagnostics, 'LOG_PATH', target):
+            for number in range(900):
+                with diagnostics.diagnostic_run('search') as fields:
+                    fields.update(mode='query', request_count=1, source_count=1,
+                                  indexed_pages=0, reused_sources=1, result_pages=3)
+        files = list(target.parent.glob('diagnostics.jsonl*'))
+        self.assertEqual(len(files), 2)
+        self.assertTrue(target.with_name('diagnostics.jsonl.1').is_file())
+        self.assertTrue(all(path.stat().st_size <= 131072 for path in files))
+
+    def test_logging_failure_does_not_break_lookup_or_hide_original_error(self):
+        blocker = self.directory / 'not-a-directory'
+        blocker.touch()
+        with patch.object(diagnostics, 'LOG_PATH', blocker / 'diagnostics.jsonl'):
+            with diagnostics.diagnostic_run('search'):
+                pass
+            with self.assertRaises(ValueError):
+                with diagnostics.diagnostic_run('search'):
+                    raise ValueError('Original operation error')
 
 
 if __name__ == '__main__':

@@ -10,9 +10,11 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+import time
 from typing import Iterable
-from diagnostics import diagnostic_run
+from diagnostics import diagnostic_run, stage_timer, user_data_root
 from reference_cache import digest
+import cache_safety
 
 def pdf_engine():
     """Warm-cache retrieval uses only SQLite; import the PDF engine on extraction."""
@@ -25,13 +27,29 @@ def pdf_engine():
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 LIBRARY_ROOT = SKILL_ROOT / "assets" / "source_documents"
-CACHE_PATH = SKILL_ROOT / ".cache" / "pdf_text_index.sqlite3"
+
+
+def default_cache_path() -> Path:
+    """Per-user index location, independent of skill installation."""
+    return user_data_root() / 'cache' / 'pdf_text_index.sqlite3'
+
+
+CACHE_PATH = default_cache_path()
 
 
 def connect(cache_path=None) -> sqlite3.Connection:
     cache_path = Path(cache_path) if cache_path is not None else CACHE_PATH
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(cache_path)
+    conn = sqlite3.connect(cache_path, timeout=cache_safety.SQLITE_TIMEOUT)
+    try:
+        initialize_schema(conn)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def initialize_schema(conn):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(
@@ -56,11 +74,28 @@ def connect(cache_path=None) -> sqlite3.Connection:
         conn.execute("INSERT OR REPLACE INTO page_lookup SELECT source_path,CAST(pdf_page AS INTEGER),rowid FROM page_text")
         conn.execute("INSERT OR REPLACE INTO search_meta VALUES ('page_lookup_version','1')")
         conn.commit()
-    return conn
 
 
 def bundled_sources() -> list[Path]:
     return sorted(LIBRARY_ROOT.glob("*.pdf"))
+
+
+def source_routing_notice(sources, request):
+    """Warn on the bundled OBC mapping volume without overriding source selection."""
+    mapping_source = (LIBRARY_ROOT / '2024 OBC.Volume 2.pdf').resolve()
+    if {source.resolve() for source in sources} != {mapping_source}:
+        return None
+    from provision_index import references
+    if not (references(request) or re.search(r'\b(?:Division\s+B|Parts?\s+\d+)\b', request, re.I)):
+        return None
+    return {
+        'selected_source': str(mapping_source),
+        'requirement_source': str((LIBRARY_ROOT / '2024 OBC.Volume 1.pdf').resolve()),
+        'notice': ('The selected bundled OBC Volume 2 contains explanatory material and supplementary standards. '
+                   'For Division B requirement text, start with Volume 1. '
+                   'SA-1 Article/Sentence rows are objective mappings, not the referenced requirement text. '
+                   'Keep necessary supplementary-standard cross-references; no source was automatically changed.'),
+    }
 
 
 def needs_index(conn: sqlite3.Connection, source: Path, rebuild: bool) -> bool:
@@ -188,7 +223,7 @@ def natural_terms(question):
 
 def focused_search(conn, sources, *, keywords, query, pattern, context, maximum, full_page):
     """Bound candidate work, rank whole source blocks, expose unresolved context."""
-    from provision_index import ensure, blocks
+    from provision_index import ensure, blocks, objective_mapping_page
     for source in sources: ensure(conn,source)
     terms = natural_terms(query) if query is not None else [word for term in keywords for word in natural_terms(term)]
     if query is not None and not terms: return []
@@ -213,10 +248,13 @@ def focused_search(conn, sources, *, keywords, query, pattern, context, maximum,
     for ordinal,(path,page,text,matches) in enumerate(prepared):
         spans=blocks(conn,Path(path),page,text)
         if not spans:
-            spans=[{'reference':None,'heading':None,'division':None,'kind':'unclassified',
+            mapping = objective_mapping_page(text)
+            spans=[{'reference':None,'heading':None,'division':None,
+                    'kind':'objective_mapping' if mapping else 'unclassified',
                     'start':0,'end':len(text),'text':text,'review_adjacent_pages':True,
                     'context_pages':[],'cross_references':[],
-                    'context_notice':'No reliable article boundary; verify full page and adjacent context.'}]
+                    'context_notice':('Objectives/functional-statements mapping, not the text of the referenced Code requirement.'
+                                      if mapping else 'No reliable article boundary; verify full page and adjacent context.')}]
         ranked=[]
         for block in spans:
             title=(block['heading'] or '')
@@ -228,6 +266,9 @@ def focused_search(conn, sources, *, keywords, query, pattern, context, maximum,
             if query and re.search(r'\bhow many\b|\bnumber of\b',query,re.I) and 'Forming Part of' in block['text']:
                 score+=2
             if block['kind']!='article':score*=.55
+            if block['kind']=='objective_mapping':
+                score*=.1
+                block['ranking_caution']='Mapping rows cannot establish operative requirements; locate the actual Code provision.'
             if requested_parts and block.get('division')=='B' and block.get('reference') and block['reference'].lstrip('A-').split('.')[0] not in requested_parts:
                 score*=.25
             if query and re.search(r'\battached\b',query,re.I) and not re.search(r'\bdetached\b',query,re.I) and re.search(r'\bdetached\b',title,re.I):
@@ -358,6 +399,61 @@ def retrieve(conn, sources, *, keywords=None, regex=None, query=None, pages=None
     return results[:max_results]
 
 
+def validated_cache_path(path, sources):
+    """Cache recovery must never rename a PDF or write into bundled source assets."""
+    path = Path(path)
+    resolved = path.resolve()
+    library = LIBRARY_ROOT.resolve()
+    if path.is_symlink() or resolved.suffix.lower() == '.pdf' or resolved == library or library in resolved.parents:
+        raise ValueError('Use a separate SQLite cache path outside the bundled source library, not a PDF or symbolic link.')
+    for source in list(sources) + bundled_sources():
+        if resolved == source.resolve() or (path.exists() and path.samefile(source)):
+            raise ValueError('Search cache must be distinct from every source PDF.')
+    return resolved
+
+
+def run_prepared(prepared, cache_path, rebuild, diagnostic=None):
+    """Run a complete request batch; failed attempts close SQLite before any recovery."""
+    indexed, reused, responses = {}, [], []
+    with stage_timer(diagnostic, 'cache_open'):
+        conn = connect(cache_path)
+    try:
+        all_sources = {str(s.resolve()): s for _, sources, _ in prepared for s in sources}
+        for resolved, source in all_sources.items():
+            with stage_timer(diagnostic, 'source_validation'):
+                stale = needs_index(conn, source, rebuild)
+            if stale:
+                with stage_timer(diagnostic, 'indexing'):
+                    indexed[resolved] = index_source(conn, source)
+            else:
+                reused.append(resolved)
+        with stage_timer(diagnostic, 'cache_commit'):
+            conn.commit()
+        for number, (job, sources, options) in enumerate(prepared):
+            results = []
+            if not job.get('index_only'):
+                with stage_timer(diagnostic, 'retrieval'):
+                    results = retrieve(conn, sources, **options)
+            if job.get('with_context', False):
+                with stage_timer(diagnostic, 'context_loading'):
+                    add_context(conn, results)
+            response = {'id': job.get('id', str(number)), 'results': results}
+            source_notice = source_routing_notice(sources, options['reference'] or options['query'] or ' '.join(options['keywords'] or []))
+            if source_notice is not None:
+                response['source_routing_notice'] = source_notice
+            if options['reference'] is not None or (options['query'] is not None and options['focused']):
+                from provision_index import references
+                requested = [ref for ref, _ in references(options['reference'] or options['query'])]
+                if requested:
+                    found = {p['reference'].rstrip('.') for r in results for p in r.get('provisions', []) if p.get('reference')}
+                    response['requested_references'] = list(dict.fromkeys(requested))
+                    response['unresolved_references'] = [ref for ref in dict.fromkeys(requested) if ref not in found]
+            responses.append(response)
+        return indexed, reused, responses
+    finally:
+        conn.close()
+
+
 def main(diagnostic=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", action="append", type=Path, help="PDF path; repeat for multiple volumes.")
@@ -437,38 +533,52 @@ def main(diagnostic=None) -> None:
                             context=context, max_results=maximum,
                             ignore_case=job.get("ignore_case", args.ignore_case),
                             full_page=job.get("full_page", args.full_page))))
+            # Normalize the inherited setting once so whole-batch retries are identical.
+            job['with_context'] = job.get('with_context', args.with_context)
     except (ValueError, TypeError, re.error, OSError) as error:
         parser.error(str(error))
-    indexed, reused = {}, []
-    conn = connect(args.cache_path)
+    all_sources = {str(s.resolve()): s for _, sources, _ in prepared for s in sources}
+    state = {'cache_wait_ms': 0, 'cache_busy_retries': 0, 'cache_recovered': False}
+    backup = None
     try:
-        all_sources = {str(s.resolve()): s for _, sources, _ in prepared for s in sources}
-        for resolved, source in all_sources.items():
-            if needs_index(conn, source, args.rebuild):
-                indexed[resolved] = index_source(conn, source)
-            else:
-                reused.append(resolved)
-        conn.commit()
-        responses = []
-        for number, (job, sources, options) in enumerate(prepared):
-            try:
-                results = [] if job.get("index_only") else retrieve(conn, sources, **options)
-                if job.get('with_context',args.with_context):
-                    add_context(conn,results)
-            except (ValueError, re.error) as error:
-                parser.error(str(error))
-            response={"id":job.get('id',str(number)),"results":results}
-            if options['reference'] is not None or (options['query'] is not None and options['focused']):
-                from provision_index import references
-                requested=[ref for ref,_ in references(options['reference'] or options['query'])]
-                if requested:
-                    found={p['reference'].rstrip('.') for r in results for p in r.get('provisions',[]) if p.get('reference')}
-                    response['requested_references']=list(dict.fromkeys(requested))
-                    response['unresolved_references']=[ref for ref in dict.fromkeys(requested) if ref not in found]
-            responses.append(response)
+        cache_path = validated_cache_path(args.cache_path or CACHE_PATH, all_sources.values())
+        with cache_safety.cache_lock(cache_path) as wait_ms:
+            state['cache_wait_ms'] = wait_ms
+            while True:
+                try:
+                    indexed, reused, responses = run_prepared(prepared, cache_path, args.rebuild, diagnostic)
+                    break
+                except sqlite3.DatabaseError as error:
+                    if cache_safety.is_busy(error):
+                        if state['cache_busy_retries'] >= cache_safety.BUSY_RETRIES:
+                            raise cache_safety.CacheBusyError(
+                                'Search index stayed busy after bounded retries. Try again shortly; no index files were reset.') from error
+                        state['cache_busy_retries'] += 1
+                        with stage_timer(diagnostic, 'cache_retry_wait'):
+                            time.sleep(0.1 * state['cache_busy_retries'])
+                    elif cache_safety.is_corrupt(error) and not state['cache_recovered']:
+                        with stage_timer(diagnostic, 'cache_recovery'):
+                            backup = cache_safety.quarantine_cache(cache_path)
+                        state['cache_recovered'] = True
+                    else:
+                        raise
+    except cache_safety.CacheBusyError as error:
+        state['cache_wait_ms'] = max(state['cache_wait_ms'], error.wait_ms)
+        parser.error(str(error))
+    except (cache_safety.CacheRecoveryError, OSError, ValueError, re.error) as error:
+        parser.error(str(error))
+    except sqlite3.DatabaseError as error:
+        if diagnostic is not None:
+            diagnostic['cache_sqlite_error'] = cache_safety.primary_code(error)
+        message = ('Search index recovery failed after one rebuild attempt; the original damaged index was preserved.'
+                   if backup else 'Search index could not be used. No automatic reset was performed for this error.')
+        parser.error(message)
     finally:
-        conn.close()
+        if diagnostic is not None:
+            diagnostic.update(state)
     payload = {"indexed_pages": indexed, "reused_sources": reused}
+    if backup is not None:
+        payload['cache_recovery'] = {'recovered': True, 'preserved_index': str(backup)}
     payload.update({"responses": responses} if batch else {"results": responses[0]["results"]})
     if not batch:
         payload.update({k:v for k,v in responses[0].items() if k not in ('id','results')})
