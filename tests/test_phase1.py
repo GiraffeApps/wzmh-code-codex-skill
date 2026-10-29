@@ -865,7 +865,7 @@ class HealthCheckRegression(unittest.TestCase):
         self.assertEqual(json.loads(failed.stdout)['checks'][0]['name'], 'Skill files')
 
     @unittest.skipUnless(os.name == 'nt', 'Windows native launcher')
-    def test_native_launcher_rejects_missing_relative_or_directory_python_without_fallback(self):
+    def test_native_launcher_diagnoses_missing_relative_or_directory_python_without_changing_config(self):
         command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/c', str(SCRIPTS / 'health_check.cmd'), '--json']
         local = self.root / 'user-data'
         for executable in (str(self.root / 'missing-python.exe'), 'python.exe', str(self.root)):
@@ -875,7 +875,267 @@ class HealthCheckRegression(unittest.TestCase):
                 self.assertEqual(failed.returncode, 1, failed.stderr)
                 self.assertFalse(json.loads(failed.stdout)['ok'])
                 self.assertEqual(json.loads(failed.stdout)['checks'][0]['name'], 'Python')
+                self.assertFalse(json.loads(failed.stdout)['configuration_changed'])
+                self.assertFalse(json.loads(failed.stdout)['remaining_health_checks_run'])
                 self.assertFalse(local.exists())
+
+    def test_first_use_records_success_and_later_uses_skip_full_setup(self):
+        first = health.ensure_readiness(self.root, self.runtime)
+        marker = self.runtime / 'setup' / 'ready.json'
+        self.assertTrue(first['ok'], first)
+        self.assertTrue(first['readiness_saved'])
+        self.assertFalse(first['cached'])
+        self.assertTrue(marker.is_file())
+        with patch.object(health, 'check_installation', side_effect=AssertionError('must not recheck')):
+            repeated = health.ensure_readiness(self.root, self.runtime)
+        self.assertTrue(repeated['cached'])
+        self.assertFalse(repeated['setup_required'])
+        self.assertEqual(repeated['checks'], [])
+        self.assertFalse(list(marker.parent.glob('.ready-*.tmp')))
+
+    def test_setup_confirmation_is_separate_for_each_user_runtime(self):
+        other = self.root / 'other-user-runtime'
+        with patch.object(health, 'check_installation', wraps=health.check_installation) as check:
+            one = health.ensure_readiness(self.root, self.runtime)
+            two = health.ensure_readiness(self.root, other)
+            reused = health.ensure_readiness(self.root, self.runtime)
+        self.assertTrue(one['ok'] and two['ok'] and reused['cached'])
+        self.assertEqual(check.call_count, 2)
+        self.assertTrue((other / 'setup' / 'ready.json').is_file())
+
+    def test_failed_dependencies_are_not_remembered_and_can_be_rechecked_after_fix(self):
+        marker = self.runtime / 'setup' / 'ready.json'
+        with patch.object(health, 'load_pdf_engine', side_effect=ImportError('fixture missing package')):
+            failed = health.ensure_readiness(self.root, self.runtime)
+        self.assertFalse(failed['ok'])
+        self.assertFalse(marker.exists())
+        fixed = health.ensure_readiness(self.root, self.runtime)
+        self.assertTrue(fixed['ok'] and fixed['readiness_saved'])
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['cached'])
+
+    def test_explicit_full_check_bypasses_ready_state_and_invalidates_it_on_failure(self):
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['ok'])
+        marker = self.runtime / 'setup' / 'ready.json'
+        with patch.object(health, 'check_installation', wraps=health.check_installation) as check:
+            fresh = health.ensure_readiness(self.root, self.runtime, force=True)
+        self.assertTrue(fresh['ok'])
+        self.assertFalse(fresh['cached'])
+        self.assertEqual(check.call_count, 1)
+        with patch.object(health, 'load_pdf_engine', side_effect=ImportError('fixture removed package')):
+            failed = health.ensure_readiness(self.root, self.runtime, force=True)
+        self.assertFalse(failed['ok'])
+        self.assertFalse(marker.exists())
+
+    def test_corrupt_ready_record_is_revalidated_instead_of_trusted(self):
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['ok'])
+        marker = self.runtime / 'setup' / 'ready.json'
+        for broken in ('not-json', '[]', 'x' * 70000):
+            marker.write_text(broken, encoding='utf-8')
+            with self.subTest(record=broken[:20]), patch.object(health, 'check_installation', wraps=health.check_installation) as check:
+                fixed = health.ensure_readiness(self.root, self.runtime)
+                self.assertTrue(fixed['ok'])
+                self.assertFalse(fixed['cached'])
+                self.assertEqual(check.call_count, 1)
+
+    def test_changed_source_does_not_bypass_verification_using_ready_state(self):
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['ok'])
+        source = self.library / self.entries[0]['filename']
+        raw = source.read_bytes()
+        self.assertIn(b'Fixture-A', raw)
+        source.write_bytes(raw.replace(b'Fixture-A', b'Fixture-B'))
+        failed = health.ensure_readiness(self.root, self.runtime)
+        self.assertFalse(failed['ok'])
+        self.assertFalse(failed['cached'])
+        self.assertFalse((self.runtime / 'setup' / 'ready.json').exists())
+        self.assertEqual(source.read_bytes(), raw.replace(b'Fixture-A', b'Fixture-B'))
+
+    def test_dependency_identity_change_refreshes_setup_silently(self):
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['ok'])
+        marker = self.runtime / 'setup' / 'ready.json'
+        data = json.loads(marker.read_text(encoding='utf-8'))
+        data['modules'][0]['file']['mtime_ns'] -= 1
+        marker.write_text(json.dumps(data), encoding='utf-8')
+        with patch.object(health, 'check_installation', wraps=health.check_installation) as check:
+            refreshed = health.ensure_readiness(self.root, self.runtime)
+        self.assertTrue(refreshed['ok'])
+        self.assertFalse(refreshed['cached'])
+        self.assertEqual(check.call_count, 1)
+
+    def test_ready_record_storage_failure_does_not_request_dependency_reinstall(self):
+        with patch.object(health.os, 'replace', side_effect=PermissionError('isolated state-folder denial')):
+            failed = health.ensure_readiness(self.root, self.runtime)
+        self.assertFalse(failed['ok'])
+        self.assertFalse(failed['readiness_saved'])
+        confirmation = next(c for c in failed['checks'] if c['name'] == 'Setup confirmation')
+        self.assertIn('Do not reinstall working Python packages', confirmation['fix'])
+        self.assertFalse(list((self.runtime / 'setup').glob('.ready-*.tmp')))
+
+    def test_new_process_reuses_setup_without_importing_pymupdf(self):
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['ok'])
+        code = ("import json,sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);import health_check as h;"
+                "r=h.ensure_readiness(Path(sys.argv[2]),Path(sys.argv[3]));"
+                "assert r['cached'],r;assert 'pymupdf' not in sys.modules;print(json.dumps(r))")
+        done = subprocess.run([sys.executable, '-B', '-c', code, str(SCRIPTS), str(self.root), str(self.runtime)],
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(json.loads(done.stdout)['cached'])
+
+    def test_verified_setup_has_no_periodic_expiry_or_installation_reminder(self):
+        self.assertTrue(health.ensure_readiness(self.root, self.runtime)['ok'])
+        marker = self.runtime / 'setup' / 'ready.json'
+        data = json.loads(marker.read_text(encoding='utf-8'))
+        data['verified_utc'] = '2000-01-01T00:00:00+00:00'
+        marker.write_text(json.dumps(data), encoding='utf-8')
+        with patch.object(health, 'check_installation', side_effect=AssertionError('no periodic setup check')):
+            self.assertTrue(health.ensure_readiness(self.root, self.runtime)['cached'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows native first-use launcher')
+    def test_native_ensure_ready_accepts_both_flag_orders_and_full_check_refreshes(self):
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        for name in ('health_check.py', 'health_check.cmd', 'diagnostics.py'):
+            (scripts / name).write_bytes((SCRIPTS / name).read_bytes())
+        env = dict(os.environ, WZMH_CODE_PYTHON=sys.executable, LOCALAPPDATA=str(self.root / 'user-local'))
+        command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/c', str(scripts / 'health_check.cmd')]
+        reports = []
+        for flags in (['--ensure-ready', '--json'], ['--json', '--ensure-ready'], ['--json']):
+            done = subprocess.run([*command, *flags], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            reports.append(json.loads(done.stdout))
+        self.assertEqual([r['cached'] for r in reports], [False, True, False])
+        self.assertEqual(len(reports[0]['checks']), 8)
+        self.assertEqual(reports[1]['checks'], [])
+        self.assertEqual(len(reports[2]['checks']), 8)
+
+
+class PythonDiscoveryRegression(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='wzmh-python-diagnostic-')
+        self.root = Path(self.temporary.name)
+        self.first = self.root / 'first' / 'python.exe'
+        self.second = self.root / 'second' / 'python.exe'
+        for path in (self.first, self.second):
+            path.parent.mkdir()
+            path.write_bytes(b'isolated executable fixture; subprocess is mocked')
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def candidate(self, path):
+        return {'path': str(path), 'origin': 'test fixture'}
+
+    def probe(self, path, ready=True):
+        data = {'executable': str(path), 'version': '3.14.5', 'implementation': 'cpython',
+                'checks': [{'name': 'PyMuPDF', 'status': 'PASS' if ready else 'FAIL', 'detail': 'fixture'},
+                           {'name': 'SQLite full-text search', 'status': 'PASS', 'detail': 'fixture'}],
+                'ready': ready}
+        return subprocess.CompletedProcess([], 0, json.dumps(data), '')
+
+    def test_verified_python_reports_wrong_path_and_exact_fix_without_reconfiguration(self):
+        selected = str(self.root / 'missing.exe')
+        env_before = dict(os.environ)
+        with patch.object(health.subprocess, 'run', return_value=self.probe(self.first)) as run:
+            report = health.diagnose_python([self.candidate(self.first)], selected_path=selected)
+        self.assertFalse(report['ok'])
+        self.assertEqual(report['reason'], 'python_path_mismatch')
+        self.assertEqual(report['suggested_python'], str(self.first))
+        self.assertEqual(report['python_configuration']['selected_path'], selected)
+        self.assertIn(str(self.first), report['checks'][0]['fix'])
+        self.assertFalse(report['remaining_health_checks_run'])
+        self.assertFalse(report['configuration_changed'])
+        self.assertEqual(dict(os.environ), env_before)
+        self.assertEqual(run.call_args.args[0][0], str(self.first))
+        self.assertIn('--probe-python', run.call_args.args[0])
+        self.assertLessEqual(run.call_args.kwargs['timeout'], 2.5)
+
+    def test_dependency_failure_is_separate_from_python_absence(self):
+        with patch.object(health.subprocess, 'run', return_value=self.probe(self.first, ready=False)):
+            report = health.diagnose_python([self.candidate(self.first)])
+        self.assertEqual(report['reason'], 'python_dependencies_missing')
+        self.assertIsNone(report['suggested_python'])
+        self.assertEqual(report['detected_pythons'][0]['checks'][0]['status'], 'FAIL')
+        self.assertIn('PyMuPDF/SQLite', report['checks'][0]['fix'])
+
+    def test_checks_next_environment_when_first_lacks_dependencies(self):
+        with patch.object(health.subprocess, 'run', side_effect=[self.probe(self.first, False), self.probe(self.second)]) as run:
+            report = health.diagnose_python([self.candidate(self.first), self.candidate(self.second)])
+        self.assertEqual(report['reason'], 'python_path_mismatch')
+        self.assertEqual(report['suggested_python'], str(self.second))
+        self.assertEqual(run.call_count, 2)
+
+    def test_stops_probing_after_first_compatible_interpreter(self):
+        with patch.object(health.subprocess, 'run', return_value=self.probe(self.first)) as run:
+            report = health.diagnose_python([self.candidate(self.first), self.candidate(self.second)])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(len(report['detected_pythons']), 1)
+        self.assertTrue(report['discovery_notes'])
+
+    def test_no_verified_candidates_does_not_claim_python_is_uninstalled(self):
+        with patch.object(health.subprocess, 'run') as run:
+            report = health.diagnose_python([])
+        run.assert_not_called()
+        self.assertEqual(report['reason'], 'python_not_verified')
+        self.assertIn('does not prove Python is not installed', report['checks'][0]['detail'])
+        self.assertIsNone(report['suggested_python'])
+
+    def test_invalid_probe_output_never_becomes_verified_python(self):
+        wrong = json.loads(self.probe(self.first).stdout)
+        wrong['implementation'] = 'ironpython'
+        inconsistent = json.loads(self.probe(self.first, False).stdout)
+        inconsistent['ready'] = True
+        for output in ('not-json', '[]', json.dumps(wrong), json.dumps(inconsistent)):
+            with self.subTest(output=output), patch.object(health.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, output, '')):
+                report = health.diagnose_python([self.candidate(self.first)])
+                self.assertEqual(report['reason'], 'python_not_verified')
+                self.assertFalse(report['detected_pythons'])
+
+    def test_timeout_and_total_budget_stop_instead_of_retrying_indefinitely(self):
+        with patch.object(health.time, 'monotonic', side_effect=[0, 0, 11, 12]), \
+             patch.object(health.subprocess, 'run', side_effect=subprocess.TimeoutExpired('probe', 2.5)) as run:
+            report = health.diagnose_python([self.candidate(self.first), self.candidate(self.second)])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(report['reason'], 'python_not_verified')
+        self.assertTrue(any('time limit' in note for note in report['discovery_notes']))
+
+    def test_zero_length_alias_relative_missing_and_duplicate_candidates_are_skipped(self):
+        alias = self.root / 'alias.exe'
+        alias.touch()
+        entries = [self.candidate(alias), self.candidate(Path('relative.exe')),
+                   self.candidate(self.root / 'missing.exe'), self.candidate(self.first), self.candidate(self.first)]
+        with patch.object(health.subprocess, 'run', return_value=self.probe(self.first, False)) as run:
+            report = health.diagnose_python(entries)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(len(report['detected_pythons']), 1)
+
+    def test_real_probe_does_not_touch_sources_indexes_or_runtime_folders(self):
+        runtime = self.root / 'unused-runtime'
+        env = dict(os.environ, LOCALAPPDATA=str(runtime))
+        probe = subprocess.run([sys.executable, '-B', str(SCRIPTS / 'health_check.py'), '--probe-python'],
+                               env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        data = json.loads(probe.stdout)
+        self.assertTrue(data['ready'])
+        self.assertEqual(Path(data['executable']).resolve(), Path(sys.executable).resolve())
+        self.assertFalse(runtime.exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows native discovery')
+    def test_native_discovery_finds_path_python_and_reports_configuration_mismatch(self):
+        runtime = self.root / 'unused-runtime'
+        missing = str(self.root / 'wrong' / 'python.exe')
+        env = dict(os.environ, WZMH_CODE_PYTHON=missing, LOCALAPPDATA=str(runtime),
+                   PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get('PATH', ''))
+        done = subprocess.run([os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/c',
+                               str(SCRIPTS / 'health_check.cmd'), '--json'], env=env,
+                              capture_output=True, text=True, timeout=25)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        report = json.loads(done.stdout)
+        self.assertEqual(report['reason'], 'python_path_mismatch')
+        self.assertEqual(Path(report['suggested_python']).resolve(), Path(sys.executable).resolve())
+        self.assertEqual(report['python_configuration']['selected_path'], missing)
+        self.assertEqual(report['detected_pythons'][0]['origin'], 'PATH')
+        self.assertFalse(report['configuration_changed'])
+        self.assertFalse(runtime.exists())
 
 
 class DiagnosticsRegression(unittest.TestCase):

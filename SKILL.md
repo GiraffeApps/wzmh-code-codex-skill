@@ -17,9 +17,17 @@ The bundled library contains three PDFs: Ontario Building Code 2024 Volume 1, On
 
 Give a concise, verified code answer and show its supporting passage in a highlighted one-page PDF in the right-side browser panel. Include two consecutive pages only when needed for a split passage or essential adjacent context. Preserve original text, vector graphics, fonts and page geometry. Never rasterize or rebuild pages. Preserve bundled originals; save annotations in a separate excerpt.
 
-## Installation health check (setup and troubleshooting only)
+## First-use prerequisites
 
-For an explicit installation/setup health-check request, run [scripts/health_check.cmd](scripts/health_check.cmd) using `& (Join-Path $CodeSkillRoot 'scripts/health_check.cmd') --json`, with `$CodeSkillRoot` set to the actual folder containing this `SKILL.md`. This setup request does not require Code/edition clarification, PDF research or a viewer. The launcher uses the same configured Python as normal lookups and reports a missing interpreter. Report the returned checks and fixes; never claim success when any check fails or is skipped. Do not install packages, change settings, re-index PDFs, reset caches or edit sources. Run only for requested setup/troubleshooting, not before ordinary questions. Checks, local temporary probes and the IT prompt are documented in [README.md](README.md#installation-health-check).
+Before the first Code lookup in an explicitly activated chat, use `& (Join-Path $CodeSkillRoot 'scripts/health_check.cmd') --ensure-ready --json`. A successful setup is remembered at `%LOCALAPPDATA%/WZMH/CodeAI/setup/ready.json` for that Windows user and machine, shared across their chats. A valid record skips dependency imports and full health checks; do not repeat installation questions, discovery or setup reports for a verified environment. Combine this guard with the first normal search in the same shell invocation as shown below, and do not run it again on ordinary follow-ups in that chat. Do not narrate a successful guard; continue with the requested Code answer.
+
+If setup is not ready, stop before Code research/highlighting. Explain the exact failure and ask the user to have IT install/configure the missing prerequisite first. The PDF dependency is the Python package **PyMuPDF**, not an Adobe/browser plug-in. Do not ask to reinstall Python when discovery found it at another path: request the reported path configuration instead. Do not request package installation for PDF-integrity, folder-permission or setup-record storage failures; report their specific fixes. Never install packages or change settings automatically. After IT fixes setup, rerun the guard and continue only when it succeeds. A successful explicit IT health check also saves the setup record.
+
+The record stores verified runtime/file identities only, not chat rules, Code selection or project facts. Changed/deleted Python, dependency files or source-package files invalidate it and are rechecked; otherwise it persists across chats. Existing source/citation/excerpt verification remains mandatory and is not replaced by this setup record. On an actual runtime failure, request only the demonstrated fix, using one fresh full health check when needed; do not blindly trust old readiness or repeatedly ask to install working software.
+
+## Installation health check (first use and requested troubleshooting)
+
+For an explicit installation/setup health-check request, run [scripts/health_check.cmd](scripts/health_check.cmd) using `& (Join-Path $CodeSkillRoot 'scripts/health_check.cmd') --json`, with `$CodeSkillRoot` set to the actual folder containing this `SKILL.md`. This forces a fresh full check and refreshes the setup record on success, rather than reusing cached readiness. This setup request does not require Code/edition clarification, PDF research or a viewer. If the configured Python path fails, bounded discovery reports verified locations and dependencies without switching interpreters. Distinguish `python_path_mismatch`, `python_dependencies_missing` and `python_not_verified`; show the failing/suggested paths and specific fixes, and do not claim Python is absent when discovery is inconclusive. That diagnostic has not run the remaining checks. Do not install packages, change settings, re-index PDFs, reset caches or edit sources. Beyond the first-use guard above, run a full check only for requested setup/troubleshooting or an actual failure. Details and the IT prompt are in [README.md](README.md#installation-health-check).
 
 ## Confirm the Code at the start of each chat
 
@@ -52,6 +60,8 @@ $CodeHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERP
 $CodeSkillRoot = Join-Path $CodeHome 'skills/wzmh-code-skill'
 $CodeManagedPython = Join-Path $env:LOCALAPPDATA 'WZMH/OBCReference/python/Scripts/python.exe'
 $CodePython = if ($env:WZMH_CODE_PYTHON) { $env:WZMH_CODE_PYTHON } elseif (Test-Path -LiteralPath $CodeManagedPython) { $CodeManagedPython } else { Join-Path $env:LOCALAPPDATA 'Python/pythoncore-3.14-64/python.exe' }
+$CodeReadiness = & (Join-Path $CodeSkillRoot 'scripts/health_check.cmd') --ensure-ready --json
+if ($LASTEXITCODE -ne 0) { Write-Output $CodeReadiness; exit 1 }
 & $CodePython (Join-Path $CodeSkillRoot 'scripts/search_pdf.py') --source (Join-Path $CodeSkillRoot 'assets/source_documents/2024 OBC.Volume 1.pdf') --query 'Question or explicit Article reference' --focused --max-results 3 --with-context --json
 ```
 
