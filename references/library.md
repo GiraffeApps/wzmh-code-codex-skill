@@ -2,6 +2,8 @@
 
 Three original PDFs are included: two OBC volumes and one NBC PDF. Both codes are supported; select the requested edition before research.
 
+The setup health check reads [library-checksums.json](library-checksums.json) for machine-readable copies of the filenames and SHA-256 values below. Update both records together only when intentionally replacing an approved source document.
+
 Use these assets as the authoritative local source copies for this skill. Their filenames are relative to the skill folder.
 
 | Code | Coverage | Asset | SHA-256 |

@@ -1,0 +1,16 @@
+{
+  "pdfs": [
+    {
+      "filename": "2024 OBC.Volume 1.pdf",
+      "sha256": "760420cd7d6fa11c33d3bd44e09086daa209e185ff492cef08e69b480b0e8186"
+    },
+    {
+      "filename": "2024 OBC.Volume 2.pdf",
+      "sha256": "921d54503a3333e56662cbc57fc6fd69d21dcbd8ad0d6734d42c03207e626879"
+    },
+    {
+      "filename": "NBC 2020 Part 1.pdf",
+      "sha256": "77c5b044fa90817d852eb5382eb7890179753125b11a9dbf7299609ee256b1a0"
+    }
+  ]
+}

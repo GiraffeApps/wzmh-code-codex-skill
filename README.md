@@ -34,6 +34,38 @@ For broad questions, it asks for the details needed to establish scope before se
 
 IT can deploy the skill and Python environment together. Installing the skill alone does not install Python or PyMuPDF. Revit and pyRevit are not required for PDF research; any Revit MCP connection is configured separately.
 
+## Installation health check
+
+After deployment, IT can type this in Codex:
+
+> Use $wzmh-code-skill to run the WZMH Code AI installation health check for this user. Report failures and the required fixes. Do not install packages or change configuration.
+
+Or run this in PowerShell for a standard installation:
+
+```powershell
+$CodeHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+& (Join-Path $CodeHome 'skills/wzmh-code-skill/scripts/health_check.cmd')
+```
+
+Run in the user's Windows session. For a custom deployment, use the actual skill folder. The native Windows launcher does not require `.ps1` execution permission. It uses `WZMH_CODE_PYTHON` when configured, then the same managed/per-user Python locations as the skill. Add `--json` for machine-readable results. Exit code `0` means all checks passed; `1` means a failure or incomplete check.
+
+This runs only during setup or troubleshooting. It opens the PDFs and checks their SHA-256 values without modifying them or building indexes. It creates missing user-local cache/log folders, tests them with temporary files, and removes its own probes. It does not install packages, change settings, test Revit connectivity or measure the PDF viewer.
+
+### Expected result
+
+After IT deploys the updated skill and dependencies, a user who runs the health-check prompt should receive a pass report when all eight checks succeed. A typical status summary is:
+
+```text
+Installation health check passed: 8/8 checks successful.
+- Python and PyMuPDF available
+- SQLite FTS5 working
+- All bundled OBC 2024 and NBC 2020 PDFs verified by SHA-256 and opened successfully
+- Local cache and log-folder access working
+No failures or fixes required. No packages or configuration were changed.
+```
+
+Codex wording and reported version numbers may vary. If a check fails or cannot complete, the report lists the issue and required fix instead of declaring success. The report appears only when the check is requested, not automatically at startup or before each question. A pass confirms installation readiness; it does not validate Code-answer accuracy, rendered highlights or browser-panel behavior.
+
 ## Install
 
 In a Codex chat, send:
@@ -45,6 +77,10 @@ Use $skill-installer to install the skill from https://github.com/GiraffeApps/wz
 Once installation is complete, use it on your next turn or start a new chat. If it does not appear, restart Codex.
 
 ## Use
+
+WZMH Code AI activates only when selected or explicitly invoked with `$wzmh-code-skill`. It is not selected automatically just because a question mentions building codes. Related follow-ups can continue in that chat without repeating the invocation.
+
+Its confidence labels, disclaimer, report link and PDF panel apply only to its active workflow. Other chats do not inherit the selected Code or response format. Unrelated requests in the same chat, including editing or discussing this skill, use normal responses. IT should deploy this skill folder as a skill, not paste its instructions into global settings, `AGENTS.md` or organization-wide chat instructions.
 
 Start with the Code and edition, followed by your question:
 
@@ -73,7 +109,7 @@ Each chat keeps up to 200 unpinned generated excerpts. References explicitly mar
 ## Repository contents
 
 - [SKILL.md](SKILL.md): Codex instructions and answering safeguards.
-- [scripts](scripts): Search, highlighting, cache and diagnostics helpers.
+- [scripts](scripts): Search, highlighting, setup checks, cache and diagnostics helpers.
 - [references](references): Source library details and supported search commands.
 - [assets/source_documents](assets/source_documents): The three bundled PDFs.
 

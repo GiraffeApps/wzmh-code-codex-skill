@@ -21,6 +21,7 @@ import highlight_sentence as highlight
 import reference_cache
 import diagnostics
 import cache_safety
+import health_check as health
 import pymupdf
 
 SENTENCE = 'The minimum width of a public corridor shall be 1 100 mm.'
@@ -679,6 +680,202 @@ class Regression(unittest.TestCase):
         self.assertNotIn('public corridor', raw)
         self.assertNotIn(str(self.source), raw)
         self.assertEqual(row['status'], 'ok')
+
+
+class HealthCheckRegression(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='wzmh-health-')
+        self.root = Path(self.temporary.name)
+        self.runtime = self.root / 'runtime'
+        self.library = self.root / 'assets' / 'source_documents'
+        self.library.mkdir(parents=True)
+        self.manifest = self.root / 'references' / 'library-checksums.json'
+        self.manifest.parent.mkdir()
+        entries = json.loads((SCRIPTS.parent / 'references' / 'library-checksums.json').read_text(encoding='utf-8'))['pdfs']
+        with pymupdf.open() as document:
+            document.new_page()
+            document.set_metadata({'author': 'Fixture-A'})
+            raw = document.tobytes()
+        self.entries = []
+        for entry in entries:
+            (self.library / entry['filename']).write_bytes(raw)
+            self.entries.append({'filename': entry['filename'], 'sha256': hashlib.sha256(raw).hexdigest()})
+        self.write_manifest(self.entries)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write_manifest(self, entries):
+        self.manifest.write_text(json.dumps({'pdfs': entries}), encoding='utf-8')
+
+    def run_check(self):
+        return health.check_installation(self.root, self.runtime)
+
+    def test_healthy_installation_preserves_sources_existing_cache_and_logs(self):
+        before = {path: path.read_bytes() for path in self.library.iterdir()}
+        for folder, name in [('cache', 'pdf_text_index.sqlite3'), ('logs', 'diagnostics.jsonl')]:
+            directory = self.runtime / folder
+            directory.mkdir(parents=True)
+            (directory / name).write_bytes(b'existing data must remain untouched')
+        report = self.run_check()
+        self.assertTrue(report['ok'], report)
+        self.assertEqual(len(report['checks']), 8)
+        self.assertTrue(all(check['status'] == 'PASS' for check in report['checks']))
+        for path, raw in before.items():
+            self.assertEqual(path.read_bytes(), raw)
+        for path in self.runtime.glob('*/*'):
+            self.assertEqual(path.read_bytes(), b'existing data must remain untouched')
+        self.assertFalse(list(self.runtime.rglob('.wzmh-health-*')))
+        self.assertEqual(len(list(self.library.iterdir())), 3)
+
+    def test_missing_dependency_skips_opening_without_false_success(self):
+        with patch.object(health, 'load_pdf_engine', side_effect=ImportError('isolated missing dependency')):
+            report = self.run_check()
+        self.assertFalse(report['ok'])
+        self.assertEqual(next(c for c in report['checks'] if c['name'] == 'PyMuPDF')['status'], 'FAIL')
+        self.assertEqual(sum(c['status'] == 'SKIP' for c in report['checks']), 3)
+        self.assertTrue(all(c.get('fix') for c in report['checks'] if c['status'] != 'PASS'))
+
+    def test_incompatible_pdf_engine_is_not_reported_as_healthy(self):
+        class OldEngine:
+            open = staticmethod(pymupdf.open)
+            class Document:
+                pass
+        with patch.object(health, 'load_pdf_engine', return_value=OldEngine):
+            report = self.run_check()
+        self.assertFalse(report['ok'])
+        self.assertEqual(next(c for c in report['checks'] if c['name'] == 'PyMuPDF')['status'], 'FAIL')
+
+    def test_sqlite_fts_failure_has_fix_and_does_not_use_disk_cache(self):
+        with patch.object(sqlite3, 'connect', side_effect=sqlite3.OperationalError('no such module: fts5')):
+            report = self.run_check()
+        check = next(c for c in report['checks'] if c['name'] == 'SQLite full-text search')
+        self.assertFalse(report['ok'])
+        self.assertEqual(check['status'], 'FAIL')
+        self.assertIn('FTS5', check['fix'])
+        self.assertFalse(list(self.runtime.rglob('*.sqlite3')))
+
+    def test_source_change_fails_checksum_without_replacing_file_or_expected_hash(self):
+        source = self.library / self.entries[0]['filename']
+        original_manifest = self.manifest.read_bytes()
+        raw = source.read_bytes()
+        self.assertIn(b'Fixture-A', raw)
+        changed = raw.replace(b'Fixture-A', b'Fixture-B')
+        source.write_bytes(changed)
+        report = self.run_check()
+        check = next(c for c in report['checks'] if c['name'] == 'PDF: ' + source.name)
+        self.assertFalse(report['ok'])
+        self.assertEqual(check['status'], 'FAIL')
+        self.assertIn('SHA-256', check['detail'])
+        self.assertEqual(source.read_bytes(), changed)
+        self.assertEqual(self.manifest.read_bytes(), original_manifest)
+
+    def test_missing_pdf_reports_failure_and_checks_remaining_files(self):
+        (self.library / self.entries[0]['filename']).unlink()
+        report = self.run_check()
+        pdfs = [c for c in report['checks'] if c['name'].startswith('PDF:')]
+        self.assertFalse(report['ok'])
+        self.assertEqual([c['status'] for c in pdfs], ['FAIL', 'PASS', 'PASS'])
+
+    def test_corrupt_pdf_is_rejected_even_when_fixture_checksum_matches(self):
+        source = self.library / self.entries[0]['filename']
+        source.write_bytes(b'not a pdf')
+        self.entries[0]['sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.write_manifest(self.entries)
+        report = self.run_check()
+        self.assertFalse(report['ok'])
+        self.assertEqual(next(c for c in report['checks'] if c['name'] == 'PDF: ' + source.name)['status'], 'FAIL')
+
+    def test_invalid_manifest_never_opens_unlisted_paths(self):
+        for change in ('traversal', 'duplicate', 'bad_hash'):
+            entries = [dict(entry) for entry in self.entries]
+            if change == 'traversal': entries[0]['filename'] = '../outside.pdf'
+            elif change == 'duplicate': entries[0]['filename'] = entries[1]['filename']
+            else: entries[0]['sha256'] = 'invalid'
+            self.write_manifest(entries)
+            with self.subTest(change=change), patch.object(health, 'check_pdf') as check_pdf:
+                report = self.run_check()
+                self.assertFalse(report['ok'])
+                check_pdf.assert_not_called()
+                self.assertEqual(next(c for c in report['checks'] if c['name'] == 'Bundled PDF manifest')['status'], 'FAIL')
+
+    def test_missing_manifest_is_actionable(self):
+        self.manifest.unlink()
+        report = self.run_check()
+        self.assertFalse(report['ok'])
+        check = next(c for c in report['checks'] if c['name'] == 'Bundled PDF manifest')
+        self.assertIn('library-checksums.json', check['fix'])
+
+    def test_blocked_runtime_folder_does_not_delete_existing_file(self):
+        self.runtime.mkdir()
+        blocker = self.runtime / 'cache'
+        blocker.write_bytes(b'keep this file')
+        report = self.run_check()
+        self.assertFalse(report['ok'])
+        self.assertEqual(next(c for c in report['checks'] if c['name'] == 'Local cache')['status'], 'FAIL')
+        self.assertEqual(next(c for c in report['checks'] if c['name'] == 'Local logs')['status'], 'PASS')
+        self.assertEqual(blocker.read_bytes(), b'keep this file')
+
+    def test_probe_permission_failure_is_not_ignored(self):
+        with patch.object(health.tempfile, 'TemporaryFile', side_effect=PermissionError('isolated probe denial')):
+            report = self.run_check()
+        self.assertFalse(report['ok'])
+        self.assertEqual([c['status'] for c in report['checks'] if c['name'].startswith('Local ')], ['FAIL', 'FAIL'])
+        self.assertFalse(list(self.runtime.rglob('.wzmh-health-*')))
+
+    def test_json_cli_exit_status_matches_health_and_uses_user_runtime(self):
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        for name in ('health_check.py', 'diagnostics.py'):
+            (scripts / name).write_bytes((SCRIPTS / name).read_bytes())
+        env = dict(os.environ, LOCALAPPDATA=str(self.root / 'user-local'))
+        command = [sys.executable, '-B', str(scripts / 'health_check.py'), '--json']
+        first = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertTrue(json.loads(first.stdout)['ok'])
+        self.assertTrue((self.root / 'user-local' / 'WZMH' / 'CodeAI' / 'cache').is_dir())
+        self.assertFalse((self.root / '.cache').exists())
+        (self.library / self.entries[0]['filename']).unlink()
+        failed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.assertFalse(json.loads(failed.stdout)['ok'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows native launcher')
+    def test_native_launcher_healthy_install_and_missing_helper_in_spaced_path(self):
+        scripts = self.root / 'package with spaces' / 'scripts'
+        scripts.mkdir(parents=True)
+        for name in ('health_check.cmd', 'health_check.py', 'diagnostics.py'):
+            (scripts / name).write_bytes((SCRIPTS / name).read_bytes())
+        # The helper locates its own deployed root, even when paths contain spaces.
+        package = scripts.parent
+        (package / 'references').mkdir()
+        (package / 'references' / 'library-checksums.json').write_bytes(self.manifest.read_bytes())
+        library = package / 'assets' / 'source_documents'
+        library.mkdir(parents=True)
+        for path in self.library.iterdir():
+            (library / path.name).write_bytes(path.read_bytes())
+        env = dict(os.environ, WZMH_CODE_PYTHON=sys.executable, LOCALAPPDATA=str(self.root / 'user-data'))
+        command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/c', str(scripts / 'health_check.cmd'), '--json']
+        healthy = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(healthy.returncode, 0, healthy.stderr)
+        self.assertTrue(json.loads(healthy.stdout)['ok'])
+        (scripts / 'health_check.py').unlink()
+        failed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.assertEqual(json.loads(failed.stdout)['checks'][0]['name'], 'Skill files')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows native launcher')
+    def test_native_launcher_rejects_missing_relative_or_directory_python_without_fallback(self):
+        command = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/c', str(SCRIPTS / 'health_check.cmd'), '--json']
+        local = self.root / 'user-data'
+        for executable in (str(self.root / 'missing-python.exe'), 'python.exe', str(self.root)):
+            with self.subTest(executable=executable):
+                env = dict(os.environ, WZMH_CODE_PYTHON=executable, LOCALAPPDATA=str(local))
+                failed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(failed.returncode, 1, failed.stderr)
+                self.assertFalse(json.loads(failed.stdout)['ok'])
+                self.assertEqual(json.loads(failed.stdout)['checks'][0]['name'], 'Python')
+                self.assertFalse(local.exists())
 
 
 class DiagnosticsRegression(unittest.TestCase):

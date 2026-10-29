@@ -1,13 +1,25 @@
 ---
 name: wzmh-code-skill
-description: Answer building-code questions from the three bundled PDFs (OBC 2024 Volumes 1 and 2, and NBC 2020 Part 1), cite precise provisions, and show yellow highlights in an original-quality one- or two-page PDF.
+description: Use WZMH Code AI when explicitly selected for building-code research from the bundled OBC 2024 and NBC 2020 PDFs, exact citations and highlighted PDF references, or its installation health check. Does not govern unrelated work, ordinary Revit queries, or maintaining the skill itself.
 ---
 
 # WZMH Code AI
 
+## Scope and activation
+
+This is an explicitly invoked task workflow, not a global chat persona. Apply its Code-selection, source, confidence, footer and PDF-panel rules only when the user selects/invokes WZMH Code AI for Code research, its related follow-ups/reference reopens, or its installation health check. `agents/openai.yaml` disables implicit invocation: a matching topic alone is not permission to activate this skill. Users can select the skill or invoke `$wzmh-code-skill`; related follow-ups in that chat do not require repeating the invocation. Code/edition answer labels and confidence ratings apply only to Code research, not installation health-check reports.
+
+Reading this file as data to edit, review, test, package, install or discuss the skill does not activate its Code-answer style. Ordinary writing, coding, Git help, general PDF work and Revit/model-data requests without Code research are outside this workflow. For those requests, do not add this skill's confidence level, disclaimer, report link, Code/edition question, Code-prefixed answer or PDF panel. If the topic changes to unrelated work in an active Code chat, answer that request normally; resume these rules only for a relevant follow-up or renewed invocation. A mention of the skill as the subject of maintenance is not an invocation to research Code.
+
+Scope all remaining instructions in this file to that active task. Keep the selected Code/edition and applicability facts within that chat's Code workflow; never import them into another chat. Shared indexes/logs are runtime data, not shared conversation instructions. Never copy these rules into global or project `AGENTS.md`, organization-wide instructions, user preferences or cross-chat memory. Do not change unrelated chats or other skills. Installation in a user's skill library does not make this response format a default for that user's other work.
+
 The bundled library contains three PDFs: Ontario Building Code 2024 Volume 1, Ontario Building Code 2024 Volume 2, and National Building Code of Canada 2020 Part 1. Select the requested code and edition; this skill is not limited to OBC.
 
 Give a concise, verified code answer and show its supporting passage in a highlighted one-page PDF in the right-side browser panel. Include two consecutive pages only when needed for a split passage or essential adjacent context. Preserve original text, vector graphics, fonts and page geometry. Never rasterize or rebuild pages. Preserve bundled originals; save annotations in a separate excerpt.
+
+## Installation health check (setup and troubleshooting only)
+
+For an explicit installation/setup health-check request, run [scripts/health_check.cmd](scripts/health_check.cmd) using `& (Join-Path $CodeSkillRoot 'scripts/health_check.cmd') --json`, with `$CodeSkillRoot` set to the actual folder containing this `SKILL.md`. This setup request does not require Code/edition clarification, PDF research or a viewer. The launcher uses the same configured Python as normal lookups and reports a missing interpreter. Report the returned checks and fixes; never claim success when any check fails or is skipped. Do not install packages, change settings, re-index PDFs, reset caches or edit sources. Run only for requested setup/troubleshooting, not before ordinary questions. Checks, local temporary probes and the IT prompt are documented in [README.md](README.md#installation-health-check).
 
 ## Confirm the Code at the start of each chat
 
@@ -125,7 +137,7 @@ Reply with **one short, bold answer naming the selected Code and edition**, conc
 
 ## Response confidence
 
-Use exactly one of these labels in the footer of every substantive code answer:
+Only for a substantive Code answer in this explicitly activated workflow, use exactly one of these labels in its footer:
 
 - **Strong confidence** — an exact, word-for-word Code quotation directly supports the conclusion and its material conditions. A quotation alone does not establish applicability; unresolved result-changing facts prevent this rating.
 - **Moderate confidence** — a related Code source was found, but the conclusion requires interpretation or is not directly supported by an exact quotation. Briefly state the material uncertainty when needed.
@@ -135,7 +147,7 @@ Display only the selected short label in ordinary answers, for example `● Stro
 
 ## Response footer and problem reporting
 
-Append this short disclaimer as the last paragraph of every user-facing final response produced using this skill, including clarification-only replies:
+Only within the active workflow defined under Scope and activation, append this short disclaimer as the last paragraph of its final responses, including its Code clarification and health-check replies. Do not attach it or the reporting link to unrelated requests or skill-development/maintenance replies, even if this file was read or the same chat previously used the skill:
 
 *AI-assisted reference only—not a compliance determination. Verify applicable Code requirements and project conditions before use.*
 
