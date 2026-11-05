@@ -16,4 +16,5 @@ venv/
 /work/
 
 /docs
-/tests
+/tests/*
+!/tests/test_http_bridge.py
