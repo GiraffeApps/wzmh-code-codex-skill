@@ -5,7 +5,7 @@ if ($clientArgs.Count -lt 1) { throw 'Usage: code_client.ps1 health|upload|searc
 
 $operation = $clientArgs[0]
 $serverUrl = $env:WZMH_CODE_SERVER_URL
-if (-not $serverUrl) { $serverUrl = 'http://127.0.0.1:8765' }
+if (-not $serverUrl) { $serverUrl = 'http://10.10.125.22:8766' }
 $serverUrl = $serverUrl.TrimEnd('/')
 $serverUri = [Uri]$serverUrl
 if ($serverUri.Scheme -notin @('http', 'https')) { throw 'WZMH_CODE_SERVER_URL must be an HTTP or HTTPS URL' }

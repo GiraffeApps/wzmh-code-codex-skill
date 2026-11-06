@@ -44,7 +44,7 @@ Expect `"ok": true` and eight `PASS` checks. This verifies PyMuPDF, SQLite FTS5,
 
 ## 3. Keep the API running
 
-Create a root-owned `/etc/wzmh-code.env` containing a random `WZMH_CODE_SERVER_TOKEN=<64-hex-character-token>` and set its mode to `0600`. Create `/etc/systemd/system/wzmh-code.service` with:
+Create `/etc/systemd/system/wzmh-code.service` with:
 
 ```ini
 [Unit]
@@ -56,7 +56,6 @@ Type=simple
 User=wzmh-code
 Group=wzmh-code
 WorkingDirectory=/opt/wzmh-code
-EnvironmentFile=/etc/wzmh-code.env
 Environment=XDG_STATE_HOME=/var/lib/wzmh-code/state
 ExecStart=/opt/wzmh-code/.venv/bin/python /opt/wzmh-code/scripts/code_server.py --host 127.0.0.1 --port 8765 --data-dir /var/lib/wzmh-code/uploads
 Restart=on-failure
@@ -76,7 +75,7 @@ sudo systemctl enable --now wzmh-code
 sudo systemctl status wzmh-code --no-pager
 ```
 
-An authenticated `GET http://127.0.0.1:8765/health` should list `obc-2024-v1`, `obc-2024-v2`, and `nbc-2020-p1`. The service rejects requests without the bearer token.
+`GET http://127.0.0.1:8765/health` should list `obc-2024-v1`, `obc-2024-v2`, and `nbc-2020-p1`. Keep this Python service bound to loopback; nginx and UFW restrict direct IP access to the private network.
 
 ## 4. Test through SSH
 
@@ -99,7 +98,6 @@ Port `8766` on this computer now reaches the server's loopback port `8765`. From
 
 ```bash
 export WZMH_CODE_SERVER_URL=http://127.0.0.1:8766
-export WZMH_CODE_SERVER_TOKEN=<token-from-server-administrator>
 python scripts/code_client.py health --full
 python scripts/code_client.py search --source-id obc-2024-v1 --reference 'Division B 3.6.2.1.(6)' --max-results 3 --with-context
 python scripts/code_client.py highlight --source-id obc-2024-v1 --page 360 --text 'Electrical equipment that is required to be located in a service room by a regulation made under the Electricity Act, 1998, shall be installed in a service room separated from the remainder of the building by a fire separation having a fire-resistance rating not less than 1 h.' --excerpt-output outputs/references/OBC-2024-3.6.2.1-6-test.pdf
@@ -117,13 +115,11 @@ Codex should use the HTTP client, give the OBC 2024 citation, link the downloade
 
 ## Direct IP through nginx
 
-The current WZMH deployment keeps the Python service on `127.0.0.1:8765` and exposes nginx at `10.10.125.22:8766`. The separate nginx server block proxies all paths to loopback, forwards `Authorization`, allows `10.10.0.0/16`, and rejects other source addresses. UFW permits TCP port `8766` from that same private range. The existing sites on ports 80 and 443 are unchanged. Keep the bearer token in the client environment and set `WZMH_CODE_SERVER_URL=http://10.10.125.22:8766`. Plain HTTP does not encrypt the token or PDFs, so use this endpoint only on the trusted private network or move it behind HTTPS.
+The current WZMH deployment keeps the Python service on `127.0.0.1:8765` and exposes nginx at `10.10.125.22:8766`. The separate nginx server block proxies all paths to loopback, allows `10.10.0.0/16`, and rejects other source addresses. UFW permits TCP port `8766` from that same private range. The existing sites on ports 80 and 443 are unchanged. Both clients default to this IP endpoint; no token or URL setting is required on the WZMH private network. Plain HTTP does not encrypt requests or PDFs, so use this endpoint only on the trusted private network or move it behind HTTPS.
 
 On a Windows client without Python, the same server works through PowerShell:
 
 ```powershell
-$env:WZMH_CODE_SERVER_URL = 'http://10.10.125.22:8766'
-# Set WZMH_CODE_SERVER_TOKEN in this environment from the server administrator.
 pwsh -NoProfile -File scripts/code_client.ps1 health --full
 pwsh -NoProfile -File scripts/code_client.ps1 search --source-id obc-2024-v1 --reference 'Division B 3.6.2.1.(6)' --max-results 3 --with-context
 ```

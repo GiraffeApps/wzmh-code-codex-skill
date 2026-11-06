@@ -34,19 +34,18 @@ The highlight command verifies the excerpt on the server, checks its transfer ch
 On a Windows client without Python, use the PowerShell client with the same subcommands and options:
 
 ```powershell
-$env:WZMH_CODE_SERVER_URL = 'http://10.10.125.22:8766'
 pwsh -NoProfile -File scripts/code_client.ps1 health --full
 pwsh -NoProfile -File scripts/code_client.ps1 search --source-id obc-2024-v1 --reference '3.6.2.1.(6)' --max-results 3 --with-context
 pwsh -NoProfile -File scripts/code_client.ps1 highlight --source-id obc-2024-v1 --page 311 --text 'Exact supporting source sentence.' --excerpt-output outputs/references/example.pdf
 ```
 
-Windows PowerShell also works: replace the prefix with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/code_client.ps1`. The server still needs Python; the Windows client does not. The current private-network endpoint requires `WZMH_CODE_SERVER_TOKEN` in the client environment; obtain it from the server administrator, not from this skill. The PowerShell client checks the server's health response and the PDF transfer checksum before saving the excerpt.
+Windows PowerShell also works: replace the prefix with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/code_client.ps1`. The server still needs Python; the Windows client does not. Both clients default to the current private-network endpoint and need no token. Set `WZMH_CODE_SERVER_URL` only to override that endpoint. The PowerShell client checks the server's health response and the PDF transfer checksum before saving the excerpt.
 
 ## Server deployment
 
-For the Ubuntu 22.04 setup, follow [DEPLOY_UBUNTU_22_04.md](DEPLOY_UBUNTU_22_04.md). The current WZMH service runs on `SV-APP1` behind nginx at `http://10.10.125.22:8766` and requires a bearer token. The server binds only to loopback; nginx limits the external port to the WZMH private network.
+For the Ubuntu 22.04 setup, follow [DEPLOY_UBUNTU_22_04.md](DEPLOY_UBUNTU_22_04.md). The current WZMH service runs on `SV-APP1` behind nginx at `http://10.10.125.22:8766` without a bearer token. The server binds only to loopback; nginx limits the external port to the WZMH private network.
 
-Set `WZMH_CODE_SERVER_URL` to the provided server address, including the nginx port or proxy path. The server refuses a non-loopback bind without `WZMH_CODE_SERVER_TOKEN`; set the same token in the client environment. Place the server on a trusted network or behind an HTTPS proxy because plain HTTP does not encrypt requests, tokens, or PDFs. The server must have the skill repository, original PDFs, and a Python environment with PyMuPDF and SQLite FTS5. A client needs either Python's standard library or Windows PowerShell.
+The clients default to `http://10.10.125.22:8766`; set `WZMH_CODE_SERVER_URL` when using another address, port, or proxy path. The current deployment uses private-network restrictions in nginx and UFW instead of a bearer token. The Python service stays bound to loopback. Use this plain HTTP endpoint only on the trusted private network because requests and PDFs are not encrypted. The server must have the skill repository, original PDFs, and a Python environment with PyMuPDF and SQLite FTS5. A client needs either Python's standard library or Windows PowerShell.
 
 The server stores uploaded PDFs in its data directory until an operator removes them. Its generated excerpt file is temporary; downloaded chat excerpts stay in `outputs/references/` until the user removes them. The HTTP client does not currently enforce the earlier local 200-PDF retention policy.
 

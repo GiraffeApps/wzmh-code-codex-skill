@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 
 def request(endpoint, payload=None, content_type="application/json"):
-    url = os.environ.get("WZMH_CODE_SERVER_URL", "http://127.0.0.1:8765").rstrip("/") + endpoint
+    url = (os.environ.get("WZMH_CODE_SERVER_URL") or "http://10.10.125.22:8766").rstrip("/") + endpoint
     headers = {"Content-Type": content_type}
     token = os.environ.get("WZMH_CODE_SERVER_TOKEN")
     if token:
