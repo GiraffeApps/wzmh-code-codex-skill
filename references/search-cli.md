@@ -1,5 +1,7 @@
 # Focused and batched PDF retrieval
 
+The commands below describe the server-side `search_pdf.py` helper. In the HTTP workflow, run `search` through `code_client.py` or `code_client.ps1` with `--source-id`; the client forwards search options while the server supplies the PDF path and JSON output. Do not pass `--source`, `--cache-path`, `--batch-file`, or `--json` to the HTTP client. For `--batch-json`, each request uses the selected source ID; omit per-request `source` and `sources` fields. The chat device does not need Python when it uses the PowerShell client.
+
 All results come from the local PDF text cache. The Windows default is `%LOCALAPPDATA%/WZMH/CodeAI/cache/pdf_text_index.sqlite3`, shared across the same user's chats, not stored in the installed skill. A normal search automatically creates a missing index or refreshes a changed source; no manual indexing step is required. `--cache-path` still selects a separate index for that invocation, including chat-local PDFs. `--index-only` remains available for explicitly requested maintenance. Existing commands retain their meanings and result fields.
 
 ```text

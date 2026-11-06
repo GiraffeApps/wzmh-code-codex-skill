@@ -31,11 +31,22 @@ python scripts/code_client.py highlight --source-id obc-2024-v1 --page 311 --tex
 
 The highlight command verifies the excerpt on the server, checks its transfer checksum, and saves it at the requested local path. The result's `preview` path is the one to open in Codex and link in the answer. Choose a new filename for each excerpt. To use a chat-supplied PDF, run `python scripts/code_client.py upload /path/to/file.pdf` and pass the returned `source_id` to search and highlight commands. Upload IDs expire when the server restarts.
 
-## Later server deployment
+On a Windows client without Python, use the PowerShell client with the same subcommands and options:
 
-For a tested Ubuntu 22.04 setup over SSH, follow [DEPLOY_UBUNTU_22_04.md](DEPLOY_UBUNTU_22_04.md). It includes the current deployment archive, a systemd service, an SSH tunnel, and an end-to-end skill test.
+```powershell
+$env:WZMH_CODE_SERVER_URL = 'http://10.10.125.22:8766'
+pwsh -NoProfile -File scripts/code_client.ps1 health --full
+pwsh -NoProfile -File scripts/code_client.ps1 search --source-id obc-2024-v1 --reference '3.6.2.1.(6)' --max-results 3 --with-context
+pwsh -NoProfile -File scripts/code_client.ps1 highlight --source-id obc-2024-v1 --page 311 --text 'Exact supporting source sentence.' --excerpt-output outputs/references/example.pdf
+```
 
-Set `WZMH_CODE_SERVER_URL` to the provided server address, such as `http://<server-ip>:8765`. The server refuses a non-loopback bind without `WZMH_CODE_SERVER_TOKEN`; set the same token in the client environment. Place the server on a trusted network or behind an HTTPS proxy because plain HTTP does not encrypt requests, tokens, or PDFs. The server must have the skill repository, original PDFs, and a Python environment with PyMuPDF and SQLite FTS5. The client only needs Python's standard library.
+Windows PowerShell also works: replace the prefix with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/code_client.ps1`. The server still needs Python; the Windows client does not. The current private-network endpoint requires `WZMH_CODE_SERVER_TOKEN` in the client environment; obtain it from the server administrator, not from this skill. The PowerShell client checks the server's health response and the PDF transfer checksum before saving the excerpt.
+
+## Server deployment
+
+For the Ubuntu 22.04 setup, follow [DEPLOY_UBUNTU_22_04.md](DEPLOY_UBUNTU_22_04.md). The current WZMH service runs on `SV-APP1` behind nginx at `http://10.10.125.22:8766` and requires a bearer token. The server binds only to loopback; nginx limits the external port to the WZMH private network.
+
+Set `WZMH_CODE_SERVER_URL` to the provided server address, including the nginx port or proxy path. The server refuses a non-loopback bind without `WZMH_CODE_SERVER_TOKEN`; set the same token in the client environment. Place the server on a trusted network or behind an HTTPS proxy because plain HTTP does not encrypt requests, tokens, or PDFs. The server must have the skill repository, original PDFs, and a Python environment with PyMuPDF and SQLite FTS5. A client needs either Python's standard library or Windows PowerShell.
 
 The server stores uploaded PDFs in its data directory until an operator removes them. Its generated excerpt file is temporary; downloaded chat excerpts stay in `outputs/references/` until the user removes them. The HTTP client does not currently enforce the earlier local 200-PDF retention policy.
 
@@ -49,4 +60,4 @@ Install this repository root as `wzmh-code-skill`, then explicitly select the sk
 python -m unittest discover -s tests
 ```
 
-Run the test suite with a Python environment containing PyMuPDF and modern SQLite error-code support. The HTTP integration test binds a loopback port. The skill's source PDFs and citation checks remain the evidence boundary; search hits alone do not establish applicability.
+Run the test suite with a Python environment containing PyMuPDF and modern SQLite error-code support. The HTTP integration tests bind a loopback port; `test_powershell_client.py` exercises a client with Python removed from its PATH. The skill's source PDFs and citation checks remain the evidence boundary; search hits alone do not establish applicability.
