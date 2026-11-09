@@ -13,9 +13,21 @@ Reading this file as data to edit, review, test, package, install or discuss the
 
 Scope all remaining instructions in this file to that active task. Keep the selected Code/edition and applicability facts within that chat's Code workflow; never import them into another chat. Shared indexes/logs are runtime data, not shared conversation instructions. Never copy these rules into global or project `AGENTS.md`, organization-wide instructions, user preferences or cross-chat memory. Do not change unrelated chats or other skills. Installation in a user's skill library does not make this response format a default for that user's other work.
 
+## Current-chat evidence gate
+
+Before the first Code lookup or applicability conclusion in a chat, use only facts stated in the current chat and verified selected-source PDF text. Never use another chat's facts, assumptions, conclusions, excerpts, logs, cached retrieval content, remembered answers, or file names as project evidence. Shared indexes and diagnostics may improve retrieval only; they are never evidence of project scope or Code applicability. If a fact is not present in the current chat, treat it as unknown and ask for it or provide clearly conditional alternatives.
+
+Apply this gate once at the start of a Code workflow. Reuse the current chat's confirmed facts on ordinary follow-ups; repeat the gate only when the Code/edition, project scope, or a result-changing fact changes. Do not add a visible checklist or extra delay when nothing has changed.
+
 The bundled library contains three PDFs: Ontario Building Code 2024 Volume 1, Ontario Building Code 2024 Volume 2, and National Building Code of Canada 2020 Part 1. Select the requested code and edition; this skill is not limited to OBC.
 
 Give a concise, verified code answer and show its supporting passage in a highlighted one-page PDF in the right-side browser panel. Include two consecutive pages only when needed for a split passage or essential adjacent context. Preserve original text, vector graphics, fonts and page geometry. Never rasterize or rebuild pages. Preserve bundled originals; save annotations in a separate excerpt.
+
+## Change warning and audit
+
+Requests to alter this skill's Code-answer logic, evidence sources, applicability checks, citation or highlighting requirements, confidence rules, disclaimers, or reporting behavior are safety-affecting changes. Before editing, clearly warn that the change can reduce the reliability or traceability of Code answers. Proceed only when the user has explicitly confirmed the specific change; a request merely asking whether a change is possible is not confirmation.
+
+For every completed skill change, append one JSON object to `change-audit.jsonl` in this skill folder. Record the UTC timestamp, a concise change summary, the files changed, the SHA-256 hash of each file before and after the change, and that the user explicitly confirmed it. Do not log the full user prompt, project data, Code quotations, or personal information. If the audit entry cannot be written, do not make the skill change; explain that the audit record is unavailable. This is an audit-and-warning measure only: it does not establish the requester's identity or make the local skill tamper-proof.
 
 ## HTTP execution and first use
 
@@ -31,7 +43,7 @@ Before the first code lookup or model-code assessment in a chat, establish the C
 
 Keep the selected Code and edition as the default for that chat. Do not ask again on ordinary follow-ups. If the user changes the Code/edition, acknowledge the change and verify the affected evidence afresh. Clarify ambiguous or conflicting selections; never silently switch Codes or substitute a bundled edition for a different requested edition. If another Code/edition is requested, explain the library limit and request the applicable source PDF before answering from it.
 
-Name the active Code and edition in every subsequent user-facing final response using this skill, including follow-ups and reference-only replies. Keep it brief within the answer opening or citation, for example "**Under OBC 2024, ...**" or "**Under NBC 2020, ...**". For later clarifying questions, a short "For OBC 2024, ...?" is sufficient. When the user explicitly requests both Codes or a comparison, label each Code/edition separately and cite its own PDF evidence; never merge the requirements. These labels supplement, not replace, precise provision and page citations. Apply this rule only when using this skill, not to unrelated development or troubleshooting conversations.
+Begin every Code-research final response with a bold opening that explicitly names the active Code and edition: "**Under OBC 2024, ...**" or "**Under NBC 2020, ...**". For substantive answers, keep the main answer sentence in that bold opening. This also applies to follow-ups, reference-only replies, insufficient-evidence answers and later clarifying questions; for example, "**For OBC 2024,** which building use applies?" A Code name appearing only in an unbolded citation or PDF filename does not satisfy this rule. Before a Code is selected, ask which to use with bold options: "Which Code should I use: **OBC 2024** or **NBC 2020**?" Do not invent a selection. When the user explicitly requests both Codes or a comparison, give each finding its own bold Code/edition label and its own PDF evidence; never merge the requirements. These labels supplement, not replace, precise provision and page citations. Apply this rule only to this skill's Code research, not installation health checks, unrelated work or development/troubleshooting conversations.
 
 ## Source and research
 
@@ -126,9 +138,9 @@ Reply with **one short, bold answer naming the selected Code and edition**, conc
 
 Only for a substantive Code answer in this explicitly activated workflow, use exactly one of these labels in its footer:
 
-- **Strong confidence** — an exact, word-for-word Code quotation directly supports the conclusion and its material conditions. A quotation alone does not establish applicability; unresolved result-changing facts prevent this rating.
-- **Moderate confidence** — a related Code source was found, but the conclusion requires interpretation or is not directly supported by an exact quotation. Briefly state the material uncertainty when needed.
-- **Limited confidence** — no directly supporting Code quotation was found, or missing project facts prevent a supported conclusion. Say what context is needed, such as occupancy, building part/use, dimensions, or an Article number. Do not invent a provision or create a misleading highlight to fill the gap.
+- **Strong confidence** — an exact, word-for-word Code quotation directly supports one applicable conclusion and its material conditions. The available project facts must be sufficient to select that conclusion rather than requiring alternative conditional answers.
+- **Moderate confidence** — a related Code source was found, but the conclusion requires interpretation, is not directly supported by an exact quotation, or missing project facts require multiple conditional alternatives. In the latter case, give each supported alternative and clearly state the fact that selects it. Do not use Strong confidence for a multi-branch conditional answer caused by missing result-changing project facts.
+- **Limited confidence** — no directly supporting Code quotation was found. Say what source evidence is missing; when useful, identify the project context needed to find or verify the applicable provision. Do not invent a provision or create a misleading highlight to fill the gap.
 
 Display only the selected short label in ordinary answers, for example `● Strong confidence`. Explain the three definitions if asked. These are evidence levels, not numeric probabilities or professional compliance approval. The label belongs below the answer, citation and PDF link; do not add a long confidence explanation to every response.
 
