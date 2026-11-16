@@ -1,7 +1,7 @@
 interface:
   display_name: "WZMH Code AI"
-  short_description: "Ontario Building Code and National Building Code Search References"
-  default_prompt: "Use `$wzmh-code-skill`."
+  short_description: "OBC and NBC answers with highlighted references"
+  default_prompt: "Use `$wzmh-code-skill` to ask a building-code question and get cited answers with highlighted PDF references from OBC 2024 and NBC 2020."
 
 policy:
   allow_implicit_invocation: false
