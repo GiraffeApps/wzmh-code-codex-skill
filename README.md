@@ -76,15 +76,34 @@ No failures or fixes required. No packages or configuration were changed.
 
 Codex wording and reported version numbers may vary. If a check fails or cannot complete, the report lists the issue and required fix instead of declaring success. The full status report appears when explicitly requested; ordinary first use reports only a setup problem and otherwise continues silently. It does not appear at Codex startup or before every question. A pass confirms installation readiness; it does not validate Code-answer accuracy, rendered highlights or browser-panel behavior.
 
-## Install
+## Install and update
 
-In a Codex chat, send:
+The skill version is in [`VERSION`](VERSION). Releases use `MAJOR.MINOR.PATCH`: increment major for incompatible workflow changes, minor for new features, and patch for fixes. Record each release in [`CHANGELOG.md`](CHANGELOG.md), commit the version change, and tag that commit `vMAJOR.MINOR.PATCH`. The installer reads this version from both the checkout and the installed skill.
 
-```text
-Use $skill-installer to install the skill from https://github.com/GiraffeApps/wzmh-code-codex-skill, branch master, repository root. Install it as wzmh-code-skill.
+From a checkout of this repository, install with:
+
+```bash
+python scripts/install_skill.py
 ```
 
-Once installation is complete, use it on your next turn or start a new chat. If it does not appear, restart Codex.
+The default destination is `$CODEX_HOME/skills/wzmh-code-skill`, or `~/.codex/skills/wzmh-code-skill` when `CODEX_HOME` is unset. On Windows, `python` can be replaced with `py -3`. To use a different destination, pass `--target PATH`.
+
+To update an existing installation directly from GitHub after a release reaches `master`, run the installer already in the installed skill:
+
+```bash
+python ~/.codex/skills/wzmh-code-skill/scripts/install_skill.py --latest
+```
+
+On Windows PowerShell:
+
+```powershell
+$CodeHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+py -3 (Join-Path $CodeHome 'skills/wzmh-code-skill/scripts/install_skill.py') --latest
+```
+
+`--latest` needs Git and network access. For an offline update, get the desired release checkout and run its `python scripts/install_skill.py`. Use `--status` to compare source and installed versions. The installer stages a complete new skill, replaces the old directory, then deletes the old copy; files removed from the new release cannot linger. It refuses to overwrite an unrelated skill or downgrade to an older version unless `--force` is specified. An unversioned installation of this skill is treated as a legacy version and replaced. User cache, logs, and generated references live outside the skill folder and are unaffected.
+
+Use the skill on your next turn or start a new chat. If it does not appear, restart Codex.
 
 ## Use
 
