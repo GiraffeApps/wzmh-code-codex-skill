@@ -18,10 +18,11 @@ VERSION_PATTERN = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')
 PAYLOAD = (
     ('agents', {'.yaml'}),
     ('references', {'.md', '.json'}),
-    ('scripts', {'.py', '.cmd'}),
+    ('scripts', {'.py', '.cmd', '.ps1'}),
     ('assets/source_documents', {'.pdf'}),
 )
-ROOT_FILES = ('SKILL.md', 'README.md', 'CHANGELOG.md', 'VERSION')
+ROOT_FILES = ('SKILL.md', 'README.md', 'CHANGELOG.md', 'VERSION',
+              'DEPLOY_UBUNTU_22_04.md', 'requirements-cloud.txt')
 
 
 def read_version(root):
@@ -49,11 +50,12 @@ def payload_files(source):
     if read_version(source) is None:
         raise ValueError('Source has no VERSION file: {}'.format(source))
     required = (
-        'agents/openai.yaml',
+        'agents/openai.yaml', 'requirements-cloud.txt',
         'references/library.md', 'references/library-checksums.json', 'references/search-cli.md',
         'scripts/cache_safety.py', 'scripts/diagnostics.py', 'scripts/health_check.cmd',
         'scripts/health_check.py', 'scripts/highlight_sentence.py', 'scripts/provision_index.py',
         'scripts/reference_cache.py', 'scripts/search_pdf.py',
+        'scripts/code_client.py', 'scripts/code_client.ps1', 'scripts/code_server.py',
         'assets/source_documents/2024 OBC.Volume 1.pdf',
         'assets/source_documents/2024 OBC.Volume 2.pdf',
         'assets/source_documents/NBC 2020 Part 1.pdf',

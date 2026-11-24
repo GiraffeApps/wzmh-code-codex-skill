@@ -23,6 +23,9 @@ class SkillInstallerTests(unittest.TestCase):
         (self.source / 'SKILL.md').write_text('---\nname: wzmh-code-skill\n---\n', encoding='utf-8')
         (self.source / 'VERSION').write_text('1.0.0\n', encoding='utf-8')
         (self.source / 'scripts').mkdir()
+        (self.source / 'requirements-cloud.txt').write_text('pymupdf\n', encoding='utf-8')
+        for name in ('code_client.py', 'code_server.py', 'code_client.ps1'):
+            (self.source / 'scripts' / name).write_text('client', encoding='utf-8')
         for name in ('cache_safety.py', 'diagnostics.py', 'health_check.cmd', 'health_check.py', 'highlight_sentence.py', 'provision_index.py', 'reference_cache.py', 'search_pdf.py'):
             (self.source / 'scripts' / name).write_text('new', encoding='utf-8')
         (self.source / 'agents').mkdir()
@@ -33,6 +36,13 @@ class SkillInstallerTests(unittest.TestCase):
         (self.source / 'assets' / 'source_documents').mkdir(parents=True)
         for name in ('2024 OBC.Volume 1.pdf', '2024 OBC.Volume 2.pdf', 'NBC 2020 Part 1.pdf'):
             (self.source / 'assets' / 'source_documents' / name).write_bytes(b'%PDF-test')
+
+    def test_http_and_powershell_clients_are_installed(self):
+        installer.install(self.source, self.target)
+        self.assertTrue((self.target / 'scripts' / 'code_client.ps1').exists())
+        self.assertTrue((self.target / 'scripts' / 'code_client.py').exists())
+        self.assertTrue((self.target / 'scripts' / 'code_server.py').exists())
+        self.assertTrue((self.target / 'requirements-cloud.txt').exists())
 
     def test_update_replaces_old_directory_and_clears_stale_files(self):
         self.target.mkdir(parents=True)
