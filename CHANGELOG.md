@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 - 2026-11-24
+
+- Require a higher version for every changed pull request and reject same-version content changes during installation.
+- Record the source Git commit in each installed copy and show it with `--status`.
+
 ## 1.0.0 - 2026-11-20
 
 - Introduce an explicit skill version and release process.

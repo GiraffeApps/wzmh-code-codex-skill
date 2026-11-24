@@ -2,6 +2,8 @@
 """Install or update WZMH Code AI from a versioned source checkout."""
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -73,6 +75,47 @@ def payload_files(source):
     return files
 
 
+def payload_fingerprint(source, files):
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: str(item.relative_to(source))):
+        digest.update(str(path.relative_to(source)).replace(os.sep, '/').encode('utf-8'))
+        digest.update(b'\0')
+        with path.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def source_commit(source):
+    try:
+        root = subprocess.check_output(['git', '-C', str(source), 'rev-parse', '--show-toplevel'],
+                                       stderr=subprocess.DEVNULL, text=True).strip()
+        if Path(root).resolve() != source:
+            return None
+        return subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'],
+                                       stderr=subprocess.DEVNULL, text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def source_modified(source):
+    if source_commit(source) is None:
+        return None
+    status = subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain',
+                                      '--untracked-files=all'], text=True)
+    return bool(status.strip())
+
+
+def read_install_info(target):
+    path = Path(target) / 'INSTALL_INFO.json'
+    if not path.is_file():
+        return None
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict):
+        raise ValueError('Invalid installation metadata: {}'.format(path))
+    return data
+
+
 def remove_path(path):
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -88,14 +131,22 @@ def install(source, target, force=False):
         raise ValueError('Source and destination must be separate directories')
     files = payload_files(source)
     incoming_version = read_version(source)
+    fingerprint = payload_fingerprint(source, files)
     exists = target.exists() or target.is_symlink()
     if exists and not is_our_skill(target):
         raise ValueError('Refusing to replace an unrelated path: {}'.format(target))
     installed_version = read_version(target) if exists else None
     if installed_version and installed_version > incoming_version and not force:
         raise ValueError('Installed version is newer; use --force to downgrade')
-    if installed_version == incoming_version and not force and not target.is_symlink():
-        return 'current'
+    if installed_version == incoming_version and not target.is_symlink():
+        info = read_install_info(target)
+        existing_fingerprint = (info or {}).get('fingerprint')
+        if existing_fingerprint is None:
+            existing_fingerprint = payload_fingerprint(target, payload_files(target))
+        if existing_fingerprint != fingerprint:
+            raise ValueError('Skill content changed without a VERSION increase')
+        if info is not None and not force:
+            return 'current'
 
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix='.wzmh-code-stage-', dir=str(target.parent)))
@@ -105,6 +156,12 @@ def install(source, target, force=False):
             destination = staging / path.relative_to(source)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(path), str(destination))
+        (staging / 'INSTALL_INFO.json').write_text(json.dumps({
+            'version': '.'.join(map(str, incoming_version)),
+            'commit': source_commit(source),
+            'source_modified': source_modified(source),
+            'fingerprint': fingerprint,
+        }, indent=2) + '\n', encoding='utf-8')
         if exists:
             backup = Path(tempfile.mkdtemp(prefix='.wzmh-code-old-', dir=str(target.parent)))
             backup.rmdir()
@@ -141,6 +198,10 @@ def main():
         installed_version = read_version(args.target)
         print('Source: {}'.format('.'.join(map(str, source_version)) if source_version else 'unversioned'))
         print('Installed: {}'.format('.'.join(map(str, installed_version)) if installed_version else 'unversioned or absent'))
+        info = read_install_info(args.target)
+        commit = info.get('commit') if info else None
+        qualifier = ' (source had uncommitted changes)' if info and info.get('source_modified') else ''
+        print('Installed commit: {}{}'.format(commit or 'unknown', qualifier))
         return
     if args.latest:
         with tempfile.TemporaryDirectory(prefix='wzmh-code-download-') as temporary:

@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +66,38 @@ class SkillInstallerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             installer.install(self.source, self.target)
         self.assertEqual((self.target / 'VERSION').read_text().strip(), '1.0.0')
+
+    def test_changed_payload_with_same_version_is_rejected(self):
+        installer.install(self.source, self.target)
+        (self.source / 'scripts' / 'search_pdf.py').write_text('changed', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            installer.install(self.source, self.target)
+        self.assertEqual((self.target / 'scripts' / 'search_pdf.py').read_text(), 'new')
+
+    def test_install_records_source_git_commit(self):
+        subprocess.run(['git', 'init', '-q', str(self.source)], check=True)
+        subprocess.run(['git', '-C', str(self.source), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.source), '-c', 'user.name=Test',
+                        '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'release'], check=True)
+        commit = subprocess.check_output(['git', '-C', str(self.source), 'rev-parse', 'HEAD'], text=True).strip()
+        installer.install(self.source, self.target)
+        info = json.loads((self.target / 'INSTALL_INFO.json').read_text())
+        self.assertEqual(info['commit'], commit)
+        self.assertEqual(info['version'], '1.0.0')
+        status = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'install_skill.py'),
+                                 '--source', str(self.source), '--target', str(self.target), '--status'],
+                                capture_output=True, text=True, check=True)
+        self.assertIn('Installed commit: ' + commit, status.stdout)
+
+    def test_modified_checkout_marks_commit_as_not_exact(self):
+        subprocess.run(['git', 'init', '-q', str(self.source)], check=True)
+        subprocess.run(['git', '-C', str(self.source), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.source), '-c', 'user.name=Test',
+                        '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], check=True)
+        (self.source / 'scripts' / 'search_pdf.py').write_text('modified', encoding='utf-8')
+        installer.install(self.source, self.target)
+        info = json.loads((self.target / 'INSTALL_INFO.json').read_text())
+        self.assertTrue(info['source_modified'])
 
     def test_symlink_install_is_replaced_without_deleting_checkout(self):
         self.target.parent.mkdir(parents=True)

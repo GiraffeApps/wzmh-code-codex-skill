@@ -78,7 +78,7 @@ Codex wording and reported version numbers may vary. If a check fails or cannot 
 
 ## Install and update
 
-The skill version is in [`VERSION`](VERSION). Releases use `MAJOR.MINOR.PATCH`: increment major for incompatible workflow changes, minor for new features, and patch for fixes. Record each release in [`CHANGELOG.md`](CHANGELOG.md), commit the version change, and tag that commit `vMAJOR.MINOR.PATCH`. The installer reads this version from both the checkout and the installed skill.
+The skill version is in [`VERSION`](VERSION). Releases use `MAJOR.MINOR.PATCH`: increment major for incompatible workflow changes, minor for new features, and patch for fixes. Record each release in [`CHANGELOG.md`](CHANGELOG.md), commit the version change, and tag that commit `vMAJOR.MINOR.PATCH`. The installer reads this version from both the checkout and the installed skill. A pull request check requires a higher version whenever repository files change; the installer also rejects changed skill contents at an unchanged version.
 
 From a checkout of this repository, install with:
 
@@ -94,14 +94,20 @@ To update an existing installation directly from GitHub after a release reaches 
 python ~/.codex/skills/wzmh-code-skill/scripts/install_skill.py --latest
 ```
 
-On Windows PowerShell:
+To inspect the installed copy without changing it, run:
+
+```bash
+python ~/.codex/skills/wzmh-code-skill/scripts/install_skill.py --status
+```
+
+On Windows PowerShell (replace `--latest` with `--status` to inspect it):
 
 ```powershell
 $CodeHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 py -3 (Join-Path $CodeHome 'skills/wzmh-code-skill/scripts/install_skill.py') --latest
 ```
 
-`--latest` needs Git and network access. For an offline update, get the desired release checkout and run its `python scripts/install_skill.py`. Use `--status` to compare source and installed versions. The installer stages a complete new skill, replaces the old directory, then deletes the old copy; files removed from the new release cannot linger. It refuses to overwrite an unrelated skill or downgrade to an older version unless `--force` is specified. An unversioned installation of this skill is treated as a legacy version and replaced. User cache, logs, and generated references live outside the skill folder and are unaffected.
+`--latest` needs Git and network access. For an offline update, get the desired release checkout and run its `python scripts/install_skill.py`. Use `--status` to compare source and installed versions and see the installed source commit. Each installation writes `INSTALL_INFO.json` with its version, payload fingerprint, and Git commit. A checkout without Git metadata reports its commit as `unknown`; an installation made before version 1.0.1 has no recorded commit until it is updated. Status marks a commit from a checkout with uncommitted changes as such. The installer stages a complete new skill, replaces the old directory, then deletes the old copy; files removed from the new release cannot linger. It refuses to overwrite an unrelated skill or downgrade to an older version unless `--force` is specified. An unversioned installation of this skill is treated as a legacy version and replaced. User cache, logs, and generated references live outside the skill folder and are unaffected.
 
 Use the skill on your next turn or start a new chat. If it does not appear, restart Codex.
 
