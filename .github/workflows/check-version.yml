@@ -1,0 +1,16 @@
+name: Require skill version bump
+
+on:
+  pull_request:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check release version
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 scripts/check_version.py --base-ref "origin/${BASE_REF}"

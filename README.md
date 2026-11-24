@@ -49,9 +49,37 @@ The clients default to `http://10.10.125.22:8766`; set `WZMH_CODE_SERVER_URL` wh
 
 The server stores uploaded PDFs in its data directory until an operator removes them. Its generated excerpt file is temporary; downloaded chat excerpts stay in `outputs/references/` until the user removes them. The HTTP client does not currently enforce the earlier local 200-PDF retention policy.
 
-## Install and use the skill
+## Install and update
 
-Install this repository root as `wzmh-code-skill`, then explicitly select the skill or invoke `$wzmh-code-skill` in a Code research chat. Configure `WZMH_CODE_SERVER_URL` in the client environment first. The skill confirms the Code and edition, searches the selected PDF, checks provisions and exceptions, and returns concise citations with highlighted excerpts. It is not automatically activated for unrelated requests.
+The skill version is in [`VERSION`](VERSION). Increase it for every changed release using `MAJOR.MINOR.PATCH`, and record the change in [`CHANGELOG.md`](CHANGELOG.md). The pull request action checks that the proposed version is higher than the target branch's version. The installer also rejects changed skill contents at an unchanged version.
+
+From a checkout of this repository, install or update with:
+
+```bash
+python scripts/install_skill.py
+```
+
+The default destination is `$CODEX_HOME/skills/wzmh-code-skill`, or `~/.codex/skills/wzmh-code-skill` when `CODEX_HOME` is unset. Use `--target PATH` for another destination. On Windows, `py -3` can replace `python`; the PowerShell research client itself does not need Python.
+
+After a release reaches `master`, update the installed copy directly from GitHub:
+
+```bash
+python ~/.codex/skills/wzmh-code-skill/scripts/install_skill.py --latest
+```
+
+Inspect its installed version and source commit without changing files:
+
+```bash
+python ~/.codex/skills/wzmh-code-skill/scripts/install_skill.py --status
+```
+
+On Windows PowerShell, run `py -3 (Join-Path $CodeHome 'skills/wzmh-code-skill/scripts/install_skill.py') --latest`, with `$CodeHome` set to `$env:CODEX_HOME` or `$env:USERPROFILE\.codex`. Replace `--latest` with `--status` to inspect it. `--latest` needs Git and network access. For an offline update, get the desired release checkout and run its installer.
+
+Each install records its version, payload fingerprint, and Git commit in `INSTALL_INFO.json`. A checkout without Git metadata reports its commit as `unknown`; installs made before version 1.0.1 have no recorded commit until updated. A checkout with uncommitted changes is marked as such. The installer stages the new skill, replaces the old directory, and removes old files. It refuses to replace an unrelated skill or downgrade unless `--force` is specified. User caches, logs, and generated references live outside the skill folder.
+
+## Use the skill
+
+Install this repository root as `wzmh-code-skill`, then explicitly select it or invoke `$wzmh-code-skill` in a Code research chat. The clients default to the current private-network server; set `WZMH_CODE_SERVER_URL` to override that endpoint. The skill confirms the Code and edition, searches the selected PDF, checks provisions and exceptions, and returns concise citations with highlighted excerpts. It is not automatically activated for unrelated requests. If it does not appear after installation, restart Codex.
 
 ## Verify
 
